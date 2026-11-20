@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "volytragoto",
+  "version": "${version}",
+  "name": "Volytra Goto",
+  "description": "Meteor addon. Baritone-style goto for elytra: plans a 3D path through the loaded chunks and steers VolytraFly along it (.vgoto x z / x y z / stop).",
+  "authors": ["NoSleepSmoke"],
+  "contributors": ["ChatGPT", "Claude"],
+  "contact": {
+    "sources": "https://github.com/NoSleepSmoke/volytra-goto"
+  },
+  "license": "GPL-3.0",
+  "environment": "client",
+  "entrypoints": {
+    "meteor": ["dev.volytragoto.VolytraGotoAddon"]
+  },
+  "mixins": ["volytragoto.mixins.json"],
+  "custom": {
+    "modmenu": {
+      "parent": {
+        "id": "meteor-client"
+      }
+    }
+  },
+  "depends": {
+    "fabricloader": ">=0.15.0",
+    "minecraft": "1.21.11",
+    "java": ">=21",
+    "meteor-client": "*",
+    "volytrafly": "*"
+  }
+}

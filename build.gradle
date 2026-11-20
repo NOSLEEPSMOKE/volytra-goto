@@ -1,0 +1,39 @@
+plugins {
+	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+}
+
+version = "${project.mod_version}+mc${project.minecraft_version}"
+group = project.maven_group
+base { archivesName = project.archives_base_name }
+
+dependencies {
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	// Compile only, not bundled: Meteor Client, its event bus (orbit) and VolytraFly. Put the jars in libs/ - see
+	// libs/README.md for where to get them.
+	modCompileOnly files("libs/meteor-client-1.21.11-86.jar")
+	compileOnly files("libs/orbit-0.2.4.jar")
+	modCompileOnly files("libs/VolytraFly-0.1.1-1.21.11.jar")
+}
+
+processResources {
+	def version = project.mod_version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") {
+		expand "version": version
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	it.options.release = 21
+}
+
+java {
+	sourceCompatibility = JavaVersion.VERSION_21
+	targetCompatibility = JavaVersion.VERSION_21
+}
+
+jar {
+	from("LICENSE") { rename { "LICENSE_volytragoto" } }
+}
