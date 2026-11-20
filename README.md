@@ -76,10 +76,11 @@ The many smaller numbers (lava margins, take-off timing, how hard it may acceler
 
 ## Building
 
-1. Put the VolytraFly jar named in [libs/README.md](libs/README.md) into `libs/`. Meteor Client is fetched from its
-   maven by the build.
-2. Run `./gradlew build` with a JDK 25 or newer.
-3. The jar is in `build/libs/`.
+Clone the repository, switch to this branch and run `./gradlew build` (`gradlew.bat build` on Windows) with a JDK 25 or
+newer. The jar ends up in `build/libs/`.
+
+Nothing has to be added by hand: the build downloads Minecraft, Meteor Client (from Meteor's maven) and VolytraFly
+(from its GitHub release) to compile against. None of them ends up inside the Volytra Goto jar.
 
 ## Credits
 

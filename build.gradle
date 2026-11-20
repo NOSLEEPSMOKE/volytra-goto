@@ -15,16 +15,24 @@ repositories {
 		name = "meteor-maven-snapshots"
 		url = "https://maven.meteordev.org/snapshots"
 	}
+	// VolytraFly has no maven: take its jar straight from the GitHub release
+	// (.../releases/download/<version>/VolytraFly-<version>-<minecraft>.jar)
+	ivy {
+		name = "volytrafly-releases"
+		url = "https://github.com/Volizray/VolytraFly-Addon/releases/download"
+		patternLayout { artifact "[revision]/[module]-[revision]-[classifier].[ext]" }
+		metadataSources { artifact() }
+		content { includeGroup "com.volytrafly" }
+	}
 }
 
 dependencies {
 	// Minecraft 26.1+ is unobfuscated: no mappings, no remapping.
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
 	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
-	// Compile only, not bundled. Meteor comes from its maven; VolytraFly has none, so its jar goes in libs/ - see
-	// libs/README.md.
+	// Compile only, not bundled: players install Meteor Client and VolytraFly themselves.
 	compileOnly "meteordevelopment:meteor-client:${project.meteor_version}"
-	compileOnly files("libs/VolytraFly-0.1.2-26.2.jar")
+	compileOnly "com.volytrafly:VolytraFly:${project.volytrafly_version}:${project.minecraft_version}@jar"
 }
 
 processResources {
