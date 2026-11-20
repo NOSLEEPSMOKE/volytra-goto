@@ -2,7 +2,7 @@ package dev.volytragoto.mixin;
 
 import com.volytrafly.modules.movement.volytrafly.VolytraFly;
 import dev.volytragoto.modules.VolytraGoto;
-import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.KeyMapping;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -16,7 +16,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 @Mixin(value = VolytraFly.class, remap = false)
 public abstract class VolytraFlyMixin {
     @Inject(method = "isKeyPhysicallyPressed", at = @At("HEAD"), cancellable = true)
-    private void volytragoto$heldByGoto(KeyBinding key, CallbackInfoReturnable<Boolean> cir) {
+    private void volytragoto$heldByGoto(KeyMapping key, CallbackInfoReturnable<Boolean> cir) {
         if (VolytraGoto.isHoldingKey(key)) cir.setReturnValue(true);
     }
 }

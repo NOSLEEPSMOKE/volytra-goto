@@ -1,37 +1,48 @@
 plugins {
-	id 'net.fabricmc.fabric-loom-remap' version "${loom_version}"
+	id 'net.fabricmc.fabric-loom' version "${loom_version}"
 }
 
 version = "${project.mod_version}+mc${project.minecraft_version}"
 group = project.maven_group
 base { archivesName = project.archives_base_name }
 
+repositories {
+	maven {
+		name = "meteor-maven"
+		url = "https://maven.meteordev.org/releases"
+	}
+	maven {
+		name = "meteor-maven-snapshots"
+		url = "https://maven.meteordev.org/snapshots"
+	}
+}
+
 dependencies {
+	// Minecraft 26.1+ is unobfuscated: no mappings, no remapping.
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
-	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-	// Compile only, not bundled: Meteor Client, its event bus (orbit) and VolytraFly. Put the jars in libs/ - see
-	// libs/README.md for where to get them.
-	modCompileOnly files("libs/meteor-client-1.21.11-86.jar")
-	compileOnly files("libs/orbit-0.2.4.jar")
-	modCompileOnly files("libs/VolytraFly-0.1.1-1.21.11.jar")
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	// Compile only, not bundled. Meteor comes from its maven; VolytraFly has none, so its jar goes in libs/ - see
+	// libs/README.md.
+	compileOnly "meteordevelopment:meteor-client:${project.meteor_version}"
+	compileOnly files("libs/VolytraFly-0.1.2-26.2.jar")
 }
 
 processResources {
-	def version = project.mod_version
-	inputs.property "version", version
+	def props = [version: project.mod_version, mc_version: project.minecraft_version]
+	inputs.properties props
 	filesMatching("fabric.mod.json") {
-		expand "version": version
+		expand props
 	}
 }
 
 tasks.withType(JavaCompile).configureEach {
-	it.options.release = 21
+	it.options.encoding = "UTF-8"
+	it.options.release = 25
 }
 
 java {
-	sourceCompatibility = JavaVersion.VERSION_21
-	targetCompatibility = JavaVersion.VERSION_21
+	sourceCompatibility = JavaVersion.VERSION_25
+	targetCompatibility = JavaVersion.VERSION_25
 }
 
 jar {

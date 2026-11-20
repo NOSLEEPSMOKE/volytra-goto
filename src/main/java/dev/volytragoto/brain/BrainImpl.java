@@ -12,15 +12,43 @@ import java.util.List;
 import java.util.Set;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.events.entity.player.PlayerMoveEvent;
-import meteordevelopment.meteorclient.mixin.PlayerMoveC2SPacketAccessor;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
-import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
+import net.minecraft.client.KeyMapping;
+import net.minecraft.client.Minecraft;
+import net.minecraft.core.BlockPos;
+import net.minecraft.network.chat.Component;
+import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
+import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
+import net.minecraft.network.protocol.game.ClientboundPlayerPositionPacket;
+import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
+import net.minecraft.network.protocol.game.ServerboundPlayerCommandPacket;
+import net.minecraft.resources.ResourceKey;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.util.Mth;
+import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.LivingEntity;
+import net.minecraft.world.entity.MoverType;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
+import net.minecraft.world.item.enchantment.EnchantmentEffectComponents;
+import net.minecraft.world.item.enchantment.EnchantmentHelper;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.level.chunk.LevelChunkSection;
+import net.minecraft.world.level.levelgen.Heightmap;
+import net.minecraft.world.level.material.FluidState;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.mixininterface.IVec3d;
+import meteordevelopment.meteorclient.mixininterface.IVec3;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Modules;
@@ -31,35 +59,6 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.option.KeyBinding;
-import net.minecraft.component.EnchantmentEffectComponentTypes;
-import net.minecraft.enchantment.EnchantmentHelper;
-import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.MovementType;
-import net.minecraft.fluid.FluidState;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
-import net.minecraft.network.packet.s2c.common.DisconnectS2CPacket;
-import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
-import net.minecraft.network.packet.s2c.play.EntityDamageS2CPacket;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.tag.FluidTags;
-import net.minecraft.text.Text;
-import net.minecraft.util.Hand;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.Heightmap;
-import net.minecraft.world.World;
-import net.minecraft.world.chunk.ChunkSection;
-import net.minecraft.world.chunk.WorldChunk;
 
 /**
  * Volytra Goto's brain: everything about flying (path search, steering, speed, digging, elytra, portals, logout).
@@ -73,7 +72,7 @@ public class BrainImpl implements Brain {
 
     private enum Phase { TakeOff, Flying, Landing }
 
-    private static final MinecraftClient mc = MinecraftClient.getInstance();
+    private static final Minecraft mc = Minecraft.getInstance();
     private final VolytraGoto m;
 
     private final Setting<Integer> targetX;
@@ -115,12 +114,12 @@ public class BrainImpl implements Brain {
 
     // --- state ---
     private VolytraFly vf;
-    private RegistryKey<World> dimension;
+    private ResourceKey<Level> dimension;
     private Phase phase;
     private boolean holdingForward;
 
     private FlightPathfinder search;
-    private List<Vec3d> path = new ArrayList<>();
+    private List<Vec3> path = new ArrayList<>();
     private boolean pathReachesGoal, pathEndsAtFrontier;
     private int pathIdx;
     private BlockPos goalNode;
@@ -131,7 +130,7 @@ public class BrainImpl implements Brain {
     private double curV;
     private static final double MIN_V = 0.5;
     private static final DebugLog LOG = new DebugLog();
-    private Vec3d dbgVfMove = Vec3d.ZERO, dbgOurMove = Vec3d.ZERO, dbgCarrot;
+    private Vec3 dbgVfMove = Vec3.ZERO, dbgOurMove = Vec3.ZERO, dbgCarrot;
     private double dbgSH;
     private int dbgSetbacks;
     private int ticksSinceSetback, setbackMsgAge = -10000;
@@ -157,7 +156,7 @@ public class BrainImpl implements Brain {
     private final float[] dtRing = new float[60];
     private int dtIdx, catchups, pairedWarnAge = -100000;
     private boolean pairedTicks;
-    private final Vec3d[] posRing = new Vec3d[30];
+    private final Vec3[] posRing = new Vec3[30];
     private java.lang.reflect.Field minimizedField;
     private boolean minimizedLookupFailed;
     private int minimizedLogAge = -100000;
@@ -171,12 +170,12 @@ public class BrainImpl implements Brain {
      */
     private void keepFrameRate() {
         try {
-            net.minecraft.client.util.Window w = mc.getWindow();
-            if (!w.isMinimized() || minimizedLookupFailed) return;
+            com.mojang.blaze3d.platform.Window w = mc.getWindow();
+            if (!w.isIconified() || minimizedLookupFailed) return;
             if (minimizedField == null) {
-                for (String n : new String[] {"field_52735", "minimized"}) {
+                for (String n : new String[] {"minimized"}) {
                     try {
-                        java.lang.reflect.Field f = net.minecraft.client.util.Window.class.getDeclaredField(n);
+                        java.lang.reflect.Field f = com.mojang.blaze3d.platform.Window.class.getDeclaredField(n);
                         if (f.getType() != boolean.class) continue;
                         f.setAccessible(true);
                         minimizedField = f;
@@ -193,13 +192,13 @@ public class BrainImpl implements Brain {
             }
             if (!minimizedField.getBoolean(w)) return;
             minimizedField.setBoolean(w, false);
-            if (w.isMinimized()) { // not the flag isMinimized() reads after all: put it back and leave it alone
+            if (w.isIconified()) { // not the flag isMinimized() reads after all: put it back and leave it alone
                 minimizedField.setBoolean(w, true);
                 minimizedLookupFailed = true;
                 return;
             }
-            if (mc.player.age - minimizedLogAge > 6000) {
-                minimizedLogAge = mc.player.age;
+            if (mc.player.tickCount - minimizedLogAge > 6000) {
+                minimizedLogAge = mc.player.tickCount;
                 LOG.info("[VG] window minimised: keeping the game at its normal tick pace for the flight (no 10 FPS throttle)");
             }
         }
@@ -213,8 +212,8 @@ public class BrainImpl implements Brain {
     private void restoreFrameRate() {
         try {
             if (minimizedField == null) return;
-            net.minecraft.client.util.Window w = mc.getWindow();
-            boolean real = org.lwjgl.glfw.GLFW.glfwGetWindowAttrib(w.getHandle(), org.lwjgl.glfw.GLFW.GLFW_ICONIFIED) == org.lwjgl.glfw.GLFW.GLFW_TRUE;
+            com.mojang.blaze3d.platform.Window w = mc.getWindow();
+            boolean real = org.lwjgl.glfw.GLFW.glfwGetWindowAttrib(w.handle(), org.lwjgl.glfw.GLFW.GLFW_ICONIFIED) == org.lwjgl.glfw.GLFW.GLFW_TRUE;
             minimizedField.setBoolean(w, real);
         }
         catch (Throwable ignored) {
@@ -230,15 +229,15 @@ public class BrainImpl implements Brain {
     private void logHeatSource() {
         double best = Double.MAX_VALUE;
         String what = null;
-        BlockPos.Mutable q = new BlockPos.Mutable();
+        BlockPos.MutableBlockPos q = new BlockPos.MutableBlockPos();
         for (int k = 0; k < posRing.length; k++) {
-            Vec3d pp = posRing[((posIdx - 1 - k) % posRing.length + posRing.length) % posRing.length];
+            Vec3 pp = posRing[((posIdx - 1 - k) % posRing.length + posRing.length) % posRing.length];
             if (pp == null) continue;
-            int bx = MathHelper.floor(pp.x), by = MathHelper.floor(pp.y), bz = MathHelper.floor(pp.z);
+            int bx = Mth.floor(pp.x), by = Mth.floor(pp.y), bz = Mth.floor(pp.z);
             for (int dx = -2; dx <= 2; dx++) for (int dy = -2; dy <= 3; dy++) for (int dz = -2; dz <= 2; dz++) {
                 q.set(bx + dx, by + dy, bz + dz);
-                BlockState st = mc.world.getBlockState(q);
-                boolean lava = st.getFluidState().isIn(FluidTags.LAVA), fire = st.isOf(Blocks.FIRE) || st.isOf(Blocks.SOUL_FIRE);
+                BlockState st = mc.level.getBlockState(q);
+                boolean lava = st.getFluidState().is(FluidTags.LAVA), fire = st.is(Blocks.FIRE) || st.is(Blocks.SOUL_FIRE);
                 if (!lava && !fire) continue;
                 // gap between the block and our gliding hitbox (0.6 x 0.6 x 0.6 at pp)
                 double gx = Math.max(0, Math.max(q.getX() - (pp.x + 0.3), (pp.x - 0.3) - (q.getX() + 1)));
@@ -254,7 +253,7 @@ public class BrainImpl implements Brain {
         }
         LOG.info("[VG] heat source: {}", what == null ? "no lava or fire within 2 blocks of the last 30 positions" : what);
     }
-    private Vec3d takeoffAnchor;
+    private Vec3 takeoffAnchor;
     private int takeoffStill, takeoffForce, footSetbacks, footSetbackAge = -100000;
     private boolean lowTakeoff;
     private int footTicks;
@@ -291,7 +290,7 @@ public class BrainImpl implements Brain {
             var sp = Modules.get().get(meteordevelopment.meteorclient.systems.modules.movement.speed.Speed.class);
             if (sp == null || !sp.isActive() || !Tuning.b("walk.use.speed", true)) return def;
             Setting<?> v = sp.settings.get("vanilla-speed");
-            if (v != null && v.get() instanceof Number n) return MathHelper.clamp(n.doubleValue() / 20.0, def, Tuning.d("tunnel.walk.max", 0.4));
+            if (v != null && v.get() instanceof Number n) return Mth.clamp(n.doubleValue() / 20.0, def, Tuning.d("tunnel.walk.max", 0.4));
         }
         catch (Throwable ignored) {
         }
@@ -315,13 +314,13 @@ public class BrainImpl implements Brain {
      * slower, one-hit breaks refused). Pause just that option while we dig on foot and tell the server we're standing.
      */
     private void groundTruthForDigging() {
-        lastGroundDigAge = mc.player.age;
+        lastGroundDigAge = mc.player.tickCount;
         if (!groundSpoofed()) return;
         Setting<Boolean> on = antiHungerOnGround();
         if (on == null) return;
         on.set(false);
         ahSuspended = true;
-        mc.getNetworkHandler().sendPacket(new PlayerMoveC2SPacket.OnGroundOnly(true, mc.player.horizontalCollision));
+        mc.getConnection().send(new ServerboundMovePlayerPacket.StatusOnly(true, mc.player.horizontalCollision));
         LOG.info("[VG] digging on foot: Anti-Hunger's on-ground trick paused");
     }
 
@@ -358,16 +357,16 @@ public class BrainImpl implements Brain {
     private int snapAge = -10000;
     private int lastMoveEventAge = -1;
     private double lastCmdSpeed; // length of the move we sent last tick (speed changes are limited per tick)
-    private Vec3d lastCmd = Vec3d.ZERO; // the move we sent last tick (direction changes are limited per tick)
+    private Vec3 lastCmd = Vec3.ZERO; // the move we sent last tick (direction changes are limited per tick)
     private int slowAfterSetback, dvLimited, lavaTicks, takeoffFails, hardBrakes, creepEscapes, wallClips;
     private boolean lavaOkNow; // fire resistance with enough time left: lava may be flown through
     private Object hpWorld;
-    private static final Vec3d[] AXES6 = {new Vec3d(1, 0, 0), new Vec3d(-1, 0, 0), new Vec3d(0, 1, 0), new Vec3d(0, -1, 0), new Vec3d(0, 0, 1), new Vec3d(0, 0, -1)};
+    private static final Vec3[] AXES6 = {new Vec3(1, 0, 0), new Vec3(-1, 0, 0), new Vec3(0, 1, 0), new Vec3(0, -1, 0), new Vec3(0, 0, 1), new Vec3(0, 0, -1)};
 
     private int fireResTicks() {
-        var e = mc.player.getStatusEffect(net.minecraft.entity.effect.StatusEffects.FIRE_RESISTANCE);
+        var e = mc.player.getEffect(net.minecraft.world.effect.MobEffects.FIRE_RESISTANCE);
         if (e == null) return 0;
-        return e.isInfinite() ? Integer.MAX_VALUE : e.getDuration();
+        return e.isInfiniteDuration() ? Integer.MAX_VALUE : e.getDuration();
     }
     private float lastHp = -1;
     private volatile String lastDamageType = "?";
@@ -376,18 +375,18 @@ public class BrainImpl implements Brain {
     private int lastHurtAge = -10000;
     private BlockPos fixedGoal, portalFound;
     private boolean divertedToPortal;
-    private Vec3d flightStart;
+    private Vec3 flightStart;
     private final LongOpenHashSet scannedChunks = new LongOpenHashSet();
     private final List<BlockPos> ignoredPortals = new ArrayList<>();
     private int mendTicks, mendCooldown, throwCooldown, mendBelow = -1;
     private BlockPos digOutTarget, digging;
-    private Vec3d stillAnchor;
+    private Vec3 stillAnchor;
     private int stillTicks, digTicks;
     private final java.util.ArrayDeque<double[]> progress = new java.util.ArrayDeque<>(); // {age, distance left}
     private double curSpeed, dbgTargetSpeed, dbgClearAhead;
-    private Vec3d lastMovePos, lastWant = Vec3d.ZERO;
+    private Vec3 lastMovePos, lastWant = Vec3.ZERO;
     private BlockPos mineTarget;
-    private Vec3d mineFrom;
+    private Vec3 mineFrom;
     private final LongOpenHashSet noMine = new LongOpenHashSet();
 
     public BrainImpl(VolytraGoto m) {
@@ -433,12 +432,12 @@ public class BrainImpl implements Brain {
     /** Start (or redirect) a goto. y == null: land at x z. */
     @Override
     public void go(int x, Integer y, int z) {
-        if (mc.world != null && !mc.world.getWorldBorder().contains(x + 0.5, z + 0.5)) {
+        if (mc.level != null && !mc.level.getWorldBorder().isWithinBounds(x + 0.5, z + 0.5)) {
             m.error("%d %d is outside the world border.", x, z);
             return;
         }
-        if (y != null && mc.world != null) {
-            int clamped = MathHelper.clamp(y, mc.world.getBottomY() + 1, mc.world.getTopYInclusive() - 2);
+        if (y != null && mc.level != null) {
+            int clamped = Mth.clamp(y, mc.level.getMinY() + 1, mc.level.getMaxY() - 2);
             if (clamped != y) m.warning("Y %d is outside the world, using %d.", y, clamped);
             y = clamped;
         }
@@ -459,7 +458,7 @@ public class BrainImpl implements Brain {
             // heading for was marked "looked at", so giving the command again made the bot forget it for good)
             scannedChunks.clear();
             ignoredPortals.clear();
-            if (mc.player != null) flightStart = mc.player.getEntityPos();
+            if (mc.player != null) flightStart = mc.player.position();
             m.info("Now flying to %s.", targetString());
         }
         else m.toggle();
@@ -471,7 +470,7 @@ public class BrainImpl implements Brain {
 
     @Override
     public void activate() {
-        if (mc.player == null || mc.world == null) {
+        if (mc.player == null || mc.level == null) {
             m.toggle();
             return;
         }
@@ -483,13 +482,13 @@ public class BrainImpl implements Brain {
         }
         resetAgeStamps();
         if (!hasElytra()) {
-            FindItemResult packed = InvUtils.find(st -> LivingEntity.canGlideWith(st, EquipmentSlot.CHEST), 0, 35);
+            FindItemResult packed = InvUtils.find(st -> LivingEntity.canGlideUsing(st, EquipmentSlot.CHEST), 0, 35);
             if (packed.found()) {
                 InvUtils.move().from(packed.slot()).toArmor(2);
                 m.info("Put the elytra from your inventory on.");
             }
         }
-        if (!hasElytra() && !InvUtils.find(st -> LivingEntity.canGlideWith(st, EquipmentSlot.CHEST), 0, 35).found()) {
+        if (!hasElytra() && !InvUtils.find(st -> LivingEntity.canGlideUsing(st, EquipmentSlot.CHEST), 0, 35).found()) {
             m.error("Put an elytra on first.");
             m.toggle();
             return;
@@ -508,8 +507,8 @@ public class BrainImpl implements Brain {
         LOG.info("[VG] flight settings: portal-stop={} (tuning override {}), portal-ignore-radius={}, logout-on-arrival={}, mine-through-walls={}",
             portalStop.get(), Tuning.b("portal.stop", false), portalIgnoreRadius.get(), logoutOnArrival.get(), mineThrough.get());
 
-        dimension = mc.world.getRegistryKey();
-        phase = mc.player.isGliding() ? Phase.Flying : Phase.TakeOff;
+        dimension = mc.level.dimension();
+        phase = mc.player.isFallFlying() ? Phase.Flying : Phase.TakeOff;
         takeoffWait = 0;
         groundTicks = 0;
         jumps = 0;
@@ -523,16 +522,16 @@ public class BrainImpl implements Brain {
         fixedGoal = null;
         portalFound = null;
         divertedToPortal = false;
-        flightStart = mc.player.getEntityPos();
+        flightStart = mc.player.position();
         scannedChunks.clear();
         ignoredPortals.clear();
         travelYaw = Float.NaN;
         resetRoute();
 
-        Vec3d p = mc.player.getEntityPos();
+        Vec3 p = mc.player.position();
         double dist = Math.hypot(targetX.get() + 0.5 - p.x, targetZ.get() + 0.5 - p.z);
         m.info("Flying to %s (%.0f blocks).", targetString(), dist);
-        if (mc.world.getRegistryKey() == World.NETHER && dist > 20000) {
+        if (mc.level.dimension() == Level.NETHER && dist > 20000) {
             m.warning("You're in the Nether. If those are Overworld coords, use .vgoto ow %d %d instead (flies to %d %d here).",
                 targetX.get(), targetZ.get(), Math.floorDiv(targetX.get(), 8), Math.floorDiv(targetZ.get(), 8));
         }
@@ -579,42 +578,42 @@ public class BrainImpl implements Brain {
         restoreFrameRate();
         restoreAntiHunger();
         releaseSwimKeys();
-        if (stowedElytraSlot >= 0 && mc.player != null && !mc.player.getEquippedStack(EquipmentSlot.CHEST).isOf(Items.ELYTRA)
-            && mc.player.getInventory().getStack(stowedElytraSlot).isOf(Items.ELYTRA)) InvUtils.move().from(stowedElytraSlot).toArmor(2);
+        if (stowedElytraSlot >= 0 && mc.player != null && !mc.player.getItemBySlot(EquipmentSlot.CHEST).is(Items.ELYTRA)
+            && mc.player.getInventory().getItem(stowedElytraSlot).is(Items.ELYTRA)) InvUtils.move().from(stowedElytraSlot).toArmor(2);
         stowedElytraSlot = -1;
         releaseForward();
         search = null;
         path = new ArrayList<>();
-        if (m.weEnabledVf && vf != null && vf.isActive() && mc.player != null && mc.player.isOnGround()) vf.toggle();
+        if (m.weEnabledVf && vf != null && vf.isActive() && mc.player != null && mc.player.onGround()) vf.toggle();
         m.weEnabledVf = false;
     }
 
     private void releaseForward() {
         if (!holdingForward) return;
         holdingForward = false;
-        KeyBinding fwd = mc.options.forwardKey;
-        fwd.setPressed(Input.isPressed(fwd));
+        KeyMapping fwd = mc.options.keyUp;
+        fwd.setDown(Input.isPressed(fwd));
     }
 
     @Override
     public void packet(PacketEvent.Receive event) {
-        if (event.packet instanceof EntityDamageS2CPacket dp && mc.player != null && dp.entityId() == mc.player.getId()) {
-            lastDamageType = dp.sourceType().getIdAsString() + (dp.sourcePosition().isPresent() ? "@" + v(dp.sourcePosition().get()) : "")
+        if (event.packet instanceof ClientboundDamageEventPacket dp && mc.player != null && dp.entityId() == mc.player.getId()) {
+            lastDamageType = dp.sourceType().getRegisteredName() + (dp.sourcePosition().isPresent() ? "@" + v(dp.sourcePosition().get()) : "")
                 + (dp.sourceCauseId() > 0 ? " cause#" + dp.sourceCauseId() : "");
             lastDamageAt = System.currentTimeMillis();
         }
-        if (event.packet instanceof net.minecraft.network.packet.s2c.play.EntityTrackerUpdateS2CPacket tp && mc.player != null && tp.id() == mc.player.getId()) {
-            for (var e : tp.trackedValues()) {
+        if (event.packet instanceof net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket tp && mc.player != null && tp.id() == mc.player.getId()) {
+            for (var e : tp.packedItems()) {
                 if (e.id() == 0 && e.value() instanceof Byte fb) {
                     int g = (fb & 0x80) != 0 ? 1 : 0;
-                    if (g != srvGlide) LOG.info("[VG] server says gliding={} (flags {}, client gliding={}, {} ticks after asking)", g == 1, Integer.toHexString(fb & 0xff), mc.player.isGliding(), mc.player.age - startSentAge);
+                    if (g != srvGlide) LOG.info("[VG] server says gliding={} (flags {}, client gliding={}, {} ticks after asking)", g == 1, Integer.toHexString(fb & 0xff), mc.player.isFallFlying(), mc.player.tickCount - startSentAge);
                     srvGlide = g;
                     if (g == 1) srvSeenTrue = true;
                 }
             }
         }
-        if (!(event.packet instanceof PlayerPositionLookS2CPacket pk) || mc.player == null || vf == null) return;
-        Vec3d toPos = pk.change().position();
+        if (!(event.packet instanceof ClientboundPlayerPositionPacket pk) || mc.player == null || vf == null) return;
+        Vec3 toPos = pk.change().position();
         String rel = String.valueOf(pk.relatives());
         mc.execute(() -> {
             try {
@@ -626,8 +625,8 @@ public class BrainImpl implements Brain {
         });
     }
 
-    private void onSetback(Vec3d to, String relatives) {
-        Vec3d at = mc.player.getEntityPos();
+    private void onSetback(Vec3 to, String relatives) {
+        Vec3 at = mc.player.position();
         dbgSetbacks++;
         snapshot("server setback #" + dbgSetbacks + " -> server pos " + v(to));
         {
@@ -639,26 +638,26 @@ public class BrainImpl implements Brain {
                 if (d > 80) slow++;
                 sb.append(Math.round(d)).append(' ');
             }
-            LOG.info("[VG] tick spacing before setback #{} (ms, oldest first; {} short, {} long, paired={}, fps {}, server tps {}, {} s since its last tick): {}", dbgSetbacks, fast, slow, pairedTicks, mc.getCurrentFps(),
+            LOG.info("[VG] tick spacing before setback #{} (ms, oldest first; {} short, {} long, paired={}, fps {}, server tps {}, {} s since its last tick): {}", dbgSetbacks, fast, slow, pairedTicks, mc.getFps(),
                 String.format("%.1f", meteordevelopment.meteorclient.utils.world.TickRate.INSTANCE.getTickRate()),
                 String.format("%.1f", meteordevelopment.meteorclient.utils.world.TickRate.INSTANCE.getTimeSinceLastTick()), sb.toString().trim());
         }
         LOG.info("[VG] SETBACK #{} phase={} gliding={} ticksSinceLast={} at=({}) server=({}) dist={} relatives={} vfMove=({}) ourMove=({}) sH={} cap={} vfStart={} vfH={} vfV={} yaw={} pitch={} travelYaw={} carrot=({}) setbackTicksLeft={} pathSize={} idx={} srvGlide={}",
-            dbgSetbacks, phase, mc.player.isGliding(), ticksSinceSetback, v(at), v(to), String.format("%.2f", at.distanceTo(to)), relatives,
+            dbgSetbacks, phase, mc.player.isFallFlying(), ticksSinceSetback, v(at), v(to), String.format("%.2f", at.distanceTo(to)), relatives,
             v(dbgVfMove), v(dbgOurMove), String.format("%.2f", dbgSH), String.format("%.2f", setbackCap),
             vf.startSpeed.get(), vf.horizontalSpeed.get(), vf.verticalSpeed.get(),
-            String.format("%.1f", mc.player.getYaw()), String.format("%.1f", mc.player.getPitch()), String.format("%.1f", travelYaw),
+            String.format("%.1f", mc.player.getYRot()), String.format("%.1f", mc.player.getXRot()), String.format("%.1f", travelYaw),
             dbgCarrot == null ? "none" : v(dbgCarrot), setbackTicks, path.size(), pathIdx, srvGlide);
         // the server pulled us back: hover a moment, then carry on from wherever we are now (slower)
         setbackTicks = setbackPause.get();
         ticksSinceSetback = 0;
-        mc.player.setVelocity(0, 0, 0);
-        if (!mc.player.isGliding()) {
+        mc.player.setDeltaMovement(0, 0, 0);
+        if (!mc.player.isFallFlying()) {
             // pulled back while on foot: the server doesn't accept where we're walking (a block it has that we don't see)
-            if (mc.player.age - footSetbackAge > 100) footSetbacks = 0;
-            footSetbackAge = mc.player.age;
+            if (mc.player.tickCount - footSetbackAge > 100) footSetbacks = 0;
+            footSetbackAge = mc.player.tickCount;
             if (++footSetbacks == Tuning.i("foot.setbacks.max", 5)) {
-                LOG.info("[VG] {} pull-backs on foot at ({}) - not walking on, taking off from here", footSetbacks, v(mc.player.getEntityPos()));
+                LOG.info("[VG] {} pull-backs on foot at ({}) - not walking on, taking off from here", footSetbacks, v(mc.player.position()));
                 m.warning("The server won't let the bot walk on here - taking off instead.");
                 takeoffForce = Tuning.i("takeoff.force.ticks", 100) * 2;
                 tunneling = false;
@@ -671,24 +670,24 @@ public class BrainImpl implements Brain {
         // the pull-back also turns the camera to where the SERVER has us looking - straight down, because that's what we
         // tell it while gliding. Put the player's own view back.
         if (!Float.isNaN(camYaw) && Tuning.b("setback.keep.camera", true)) {
-            mc.player.setYaw(camYaw);
-            mc.player.setPitch(camPitch);
+            mc.player.setYRot(camYaw);
+            mc.player.setXRot(camPitch);
         }
         lastMovePos = null;
         curSpeed = 0;
         curV = 0;
         lastCmdSpeed = 0;
-        lastCmd = Vec3d.ZERO;
+        lastCmd = Vec3.ZERO;
         slowAfterSetback = Tuning.i("setback.slow.ticks", 0);
-        if (slowOnSetback.get() && mc.player.isGliding()) {
+        if (slowOnSetback.get() && mc.player.isFallFlying()) {
             double floor = Math.max(1.0, vf.startSpeed.get());
             double now = Math.min(setbackCap, Math.max(vf.startSpeed.get(), vf.horizontalSpeed.get()));
             setbackCap = Math.max(floor, now * Tuning.d("setback.cut", 0.8));
             double nowV = Math.min(setbackCapV, Math.max(MIN_V, vf.verticalSpeed.get()));
             setbackCapV = Math.max(MIN_V, nowV * Tuning.d("setback.cut", 0.8));
         }
-        if (mc.player.age - setbackMsgAge > 200) {
-            setbackMsgAge = mc.player.age;
+        if (mc.player.tickCount - setbackMsgAge > 200) {
+            setbackMsgAge = mc.player.tickCount;
             if (setbackCap < 100) m.warning("Server pulled you back - slowing to %.1f across, %.1f up/down (blocks/tick).", setbackCap, setbackCapV);
             else m.warning("Server pulled you back.");
         }
@@ -698,13 +697,13 @@ public class BrainImpl implements Brain {
     @Override
     public String statusLine() {
         if (mc.player == null) return "";
-        Vec3d p = mc.player.getEntityPos();
+        Vec3 p = mc.player.position();
         double left = Math.hypot(targetX.get() + 0.5 - p.x, targetZ.get() + 0.5 - p.z);
         String s = String.format("%.0f blocks left", left);
         if (phase == Phase.Landing) return s + ", landing";
         double[] first = progress.peekFirst();
-        if (first != null && mc.player.age - first[0] >= 200) {
-            double perSec = (first[1] - left) / ((mc.player.age - first[0]) / 20.0);
+        if (first != null && mc.player.tickCount - first[0] >= 200) {
+            double perSec = (first[1] - left) / ((mc.player.tickCount - first[0]) / 20.0);
             if (perSec > 0.1) {
                 long secs = (long) (left / perSec);
                 s += String.format(", %.1f blocks/s, ~%s", perSec, secs >= 3600 ? (secs / 3600) + "h " + (secs % 3600 / 60) + "m" : (secs / 60) + "m " + (secs % 60) + "s");
@@ -719,7 +718,7 @@ public class BrainImpl implements Brain {
     public String infoString() {
         if (mc.player == null) return null;
         if (phase == Phase.Landing) return "landing";
-        Vec3d p = mc.player.getEntityPos();
+        Vec3 p = mc.player.position();
         return String.format("%.0fm", Math.hypot(targetX.get() + 0.5 - p.x, targetZ.get() + 0.5 - p.z));
     }
 
@@ -727,9 +726,9 @@ public class BrainImpl implements Brain {
 
     @Override
     public void tick(TickEvent.Pre event) {
-        if (mc.player == null || mc.world == null) return;
-        camYaw = mc.player.getYaw();
-        camPitch = mc.player.getPitch();
+        if (mc.player == null || mc.level == null) return;
+        camYaw = mc.player.getYRot();
+        camPitch = mc.player.getXRot();
         if (Tuning.b("fps.keep.minimized", true)) keepFrameRate();
         // how evenly are OUR ticks spaced? After a hitch the game runs the missed ticks back to back, and their movement
         // packets reach the server in one bunch - to the server that's several ticks' worth of movement in one
@@ -737,7 +736,7 @@ public class BrainImpl implements Brain {
         tickDtMs = lastTickNano == 0 ? 50 : (nowNano - lastTickNano) / 1e6;
         lastTickNano = nowNano;
         dtRing[dtIdx++ % dtRing.length] = (float) tickDtMs;
-        posRing[posIdx++ % posRing.length] = mc.player.getEntityPos();
+        posRing[posIdx++ % posRing.length] = mc.player.position();
         // The game at ~10 FPS (minimised window) runs two ticks per frame: the movement packets go out in pairs, and to the
         // server each pair is one tick moving twice as far / changing speed twice as fast. Fly at half pace while it lasts.
         int shortTicks = 0;
@@ -747,19 +746,19 @@ public class BrainImpl implements Brain {
             pairedTicks = nowPaired;
             boolean minimised = false;
             try {
-                minimised = mc.getWindow().isMinimized();
+                minimised = mc.getWindow().isIconified();
             }
             catch (Throwable ignored) {
             }
-            LOG.info("[VG] ticks {} (fps {}, window minimised={})", nowPaired ? "are coming in pairs - flying at half pace" : "are even again - normal pace", mc.getCurrentFps(), minimised);
-            if (nowPaired && mc.player.age - pairedWarnAge > 6000) {
-                pairedWarnAge = mc.player.age;
-                m.warning("The game is running at ~%d FPS%s: packets go out in bunches and the server pulls back more. Flying at half pace until the frame rate is back - keep the Minecraft window open (it can be behind other windows) for full speed.", mc.getCurrentFps(), minimised ? " (window minimised)" : "");
+            LOG.info("[VG] ticks {} (fps {}, window minimised={})", nowPaired ? "are coming in pairs - flying at half pace" : "are even again - normal pace", mc.getFps(), minimised);
+            if (nowPaired && mc.player.tickCount - pairedWarnAge > 6000) {
+                pairedWarnAge = mc.player.tickCount;
+                m.warning("The game is running at ~%d FPS%s: packets go out in bunches and the server pulls back more. Flying at half pace until the frame rate is back - keep the Minecraft window open (it can be behind other windows) for full speed.", mc.getFps(), minimised ? " (window minimised)" : "");
             }
         }
-        if (ahSuspended && mc.player.age - lastGroundDigAge > Tuning.i("dig.truth.hold", 60)) restoreAntiHunger();
+        if (ahSuspended && mc.player.tickCount - lastGroundDigAge > Tuning.i("dig.truth.hold", 60)) restoreAntiHunger();
 
-        if (mc.world.getRegistryKey() != dimension) {
+        if (mc.level.dimension() != dimension) {
             m.info("Changed dimension - stopping.");
             m.toggle();
             return;
@@ -781,8 +780,8 @@ public class BrainImpl implements Brain {
         }
 
         float hp = mc.player.getHealth() + mc.player.getAbsorptionAmount();
-        if (hpWorld != mc.world) {
-            hpWorld = mc.world;
+        if (hpWorld != mc.level) {
+            hpWorld = mc.level;
             lastHp = -1;
             resetAgeStamps();
         }
@@ -796,16 +795,16 @@ public class BrainImpl implements Brain {
             boolean fresh = System.currentTimeMillis() - lastDamageAt < 1500;
             LOG.info("[VG] DAMAGE -{} hp (now {}) type={} fire={} lava={} fall={} gliding={} hCollide={} vCollide={} speed={} total={}",
                 String.format("%.1f", lost), String.format("%.1f", hp), fresh ? lastDamageType : "unknown(" + lastDamageType + ")",
-                mc.player.isOnFire(), mc.player.isInLava(), String.format("%.1f", mc.player.fallDistance), mc.player.isGliding(),
+                mc.player.isOnFire(), mc.player.isInLava(), String.format("%.1f", mc.player.fallDistance), mc.player.isFallFlying(),
                 mc.player.horizontalCollision, mc.player.verticalCollision, String.format("%.2f", lastCmdSpeed),
                 String.format("%.1f", damageTotalMilli / 1000.0));
             snapAge = -10000;
             snapshot("damage -" + String.format("%.1f", lost) + " " + (fresh ? lastDamageType : "?"));
-            lastHurtAge = mc.player.age;
+            lastHurtAge = mc.player.tickCount;
             if (fresh && (lastDamageType.contains("lava") || lastDamageType.contains("fire"))) logHeatSource();
         }
         lastHp = hp;
-        if (hp <= Tuning.d("logout.hp", 8) && mc.player.age - lastHurtAge < 40 && !mc.player.isCreative()) {
+        if (hp <= Tuning.d("logout.hp", 8) && mc.player.tickCount - lastHurtAge < 40 && !mc.player.isCreative()) {
             logout(String.format("Health down to %.1f and still taking damage (%s) - logged out to stay alive.", hp, lastDamageType));
             m.toggle();
             return;
@@ -830,7 +829,7 @@ public class BrainImpl implements Brain {
         }
         if (!hasElytra()) {
             // not on - but is there one in the inventory? Put that on rather than calling the elytra gone.
-            FindItemResult packed = InvUtils.find(st -> LivingEntity.canGlideWith(st, EquipmentSlot.CHEST), 0, 35);
+            FindItemResult packed = InvUtils.find(st -> LivingEntity.canGlideUsing(st, EquipmentSlot.CHEST), 0, 35);
             if (packed.found()) {
                 InvUtils.move().from(packed.slot()).toArmor(2);
                 stowedElytraSlot = -1;
@@ -838,7 +837,7 @@ public class BrainImpl implements Brain {
                 lastHpKeep();
                 return;
             }
-            if (!mc.player.isOnGround()) {
+            if (!mc.player.onGround()) {
                 logout("Elytra gone mid-air - logged out before the fall.");
                 m.toggle();
                 return;
@@ -862,25 +861,25 @@ public class BrainImpl implements Brain {
             lavaTicks = 0;
             replanNow = true;
         }
-        if (mc.player.isTouchingWater()) {
+        if (mc.player.isInWater()) {
             m.warning("In water - stopping (the elytra can't fly in water).");
             m.toggle();
             return;
         }
 
-        if (mc.player.age % 20 == 0) {
-            if (mc.player.age % 20 == 0) LOG.info("[VG] dig mode={} creep={} stall={} mineTarget={} mineTicks={} speed={} target={} clearAhead={} vSpeed={} capV={} dvLimited={} hardBrakes={} wallClips={}",
+        if (mc.player.tickCount % 20 == 0) {
+            if (mc.player.tickCount % 20 == 0) LOG.info("[VG] dig mode={} creep={} stall={} mineTarget={} mineTicks={} speed={} target={} clearAhead={} vSpeed={} capV={} dvLimited={} hardBrakes={} wallClips={}",
             mineModeTicks, creepTicks, stallTicks, mineTarget, mineTicks, String.format("%.2f", curSpeed),
             String.format("%.2f", dbgTargetSpeed), String.format("%.1f", dbgClearAhead), String.format("%.2f", curV), String.format("%.2f", setbackCapV), dvLimited, hardBrakes, wallClips);
-        if (mc.player.age % 20 == 0) LOG.info("[VG] tick phase={} gliding={} onGround={} pos=({}) vel=({}) vfMove=({}) ourMove=({}) sH={} cap={} setbackTicks={} path={}/{} reachesGoal={} frontier={} search={} noProgress={} strikes={} fwdHeld={} vfOn={}",
-                phase, mc.player.isGliding(), mc.player.isOnGround(), v(mc.player.getEntityPos()), v(mc.player.getVelocity()),
+        if (mc.player.tickCount % 20 == 0) LOG.info("[VG] tick phase={} gliding={} onGround={} pos=({}) vel=({}) vfMove=({}) ourMove=({}) sH={} cap={} setbackTicks={} path={}/{} reachesGoal={} frontier={} search={} noProgress={} strikes={} fwdHeld={} vfOn={}",
+                phase, mc.player.isFallFlying(), mc.player.onGround(), v(mc.player.position()), v(mc.player.getDeltaMovement()),
                 v(dbgVfMove), v(dbgOurMove), String.format("%.2f", dbgSH), String.format("%.2f", setbackCap), setbackTicks,
                 pathIdx, path.size(), pathReachesGoal, pathEndsAtFrontier, search != null, noProgressTicks, stuckStrikes,
-                mc.options.forwardKey.isPressed(), vf.isActive());
+                mc.options.keyUp.isDown(), vf.isActive());
         }
-        if (mc.player.age % 20 == 0) {
-            Vec3d pp = mc.player.getEntityPos();
-            progress.addLast(new double[] {mc.player.age, Math.hypot(targetX.get() + 0.5 - pp.x, targetZ.get() + 0.5 - pp.z)});
+        if (mc.player.tickCount % 20 == 0) {
+            Vec3 pp = mc.player.position();
+            progress.addLast(new double[] {mc.player.tickCount, Math.hypot(targetX.get() + 0.5 - pp.x, targetZ.get() + 0.5 - pp.z)});
             while (progress.size() > 61) progress.pollFirst();
         }
         if (setbackTicks > 0) setbackTicks--;
@@ -904,58 +903,58 @@ public class BrainImpl implements Brain {
         // glide physics left in it while we were steering by hand - several blocks a tick. Left alone it flings us away
         // from where the server has us before the elytra is open again; the server rejects that, opens the elytra at ITS
         // position, and pulls us back again as soon as we move. Fall from rest instead.
-        boolean glNow = mc.player.isGliding();
-        if (!glNow && !mc.player.isOnGround() && !mc.player.isInLava() && !mc.player.isTouchingWater() && stowedElytraSlot < 0 && Tuning.b("air.drop.velocity", true)) {
-            Vec3d vel = mc.player.getVelocity();
+        boolean glNow = mc.player.isFallFlying();
+        if (!glNow && !mc.player.onGround() && !mc.player.isInLava() && !mc.player.isInWater() && stowedElytraSlot < 0 && Tuning.b("air.drop.velocity", true)) {
+            Vec3 vel = mc.player.getDeltaMovement();
             double hv = Math.hypot(vel.x, vel.z);
             if (glidingLastTick || hv > Tuning.d("air.drift.max", 0.05)) {
-                if (glidingLastTick && (hv > 0.3 || vel.y < -0.5)) LOG.info("[VG] elytra closed at ({}) - dropped the leftover velocity ({})", v(mc.player.getEntityPos()), v(vel));
-                mc.player.setVelocity(0, glidingLastTick ? MathHelper.clamp(vel.y, -0.1, 0) : vel.y, 0);
+                if (glidingLastTick && (hv > 0.3 || vel.y < -0.5)) LOG.info("[VG] elytra closed at ({}) - dropped the leftover velocity ({})", v(mc.player.position()), v(vel));
+                mc.player.setDeltaMovement(0, glidingLastTick ? Mth.clamp(vel.y, -0.1, 0) : vel.y, 0);
             }
         }
         glidingLastTick = glNow;
         // opening the elytra is two steps: the tick before, we started gliding on our side only, so that the movement
         // packet in between told the server the truth about "on ground" (NoFall says "on ground" while falling fast,
         // and the server refuses to open an elytra for someone on the ground - without telling us)
-        if (pendingStartAge >= 0 && mc.player.age > pendingStartAge) {
-            if (mc.player.isGliding() && mc.player.isInLava()) {
-                mc.player.stopGliding(); // dropped into lava in the tick between: never ask the server to open it in there
+        if (pendingStartAge >= 0 && mc.player.tickCount > pendingStartAge) {
+            if (mc.player.isFallFlying() && mc.player.isInLava()) {
+                mc.player.stopFallFlying(); // dropped into lava in the tick between: never ask the server to open it in there
                 LOG.info("[VG] elytra: not opening - in lava");
             }
-            else if (mc.player.isGliding()) {
-                mc.getNetworkHandler().sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
-                startSentAge = mc.player.age;
+            else if (mc.player.isFallFlying()) {
+                mc.getConnection().send(new ServerboundPlayerCommandPacket(mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+                startSentAge = mc.player.tickCount;
                 if (srvGlide != 1) srvGlide = 0;
-                LOG.info("[VG] elytra: open sent at ({}) vy={} fall={}", v(mc.player.getEntityPos()), String.format("%.2f", mc.player.getVelocity().y), String.format("%.1f", mc.player.fallDistance));
+                LOG.info("[VG] elytra: open sent at ({}) vy={} fall={}", v(mc.player.position()), String.format("%.2f", mc.player.getDeltaMovement().y), String.format("%.1f", mc.player.fallDistance));
             }
             pendingStartAge = -1;
         }
         // we think we're gliding but the server never confirmed it: every move would be pulled back. Close it here too
         // and open it again properly.
-        if (mc.player.isGliding() && srvGlide == 0 && srvSeenTrue && pendingStartAge < 0 && Tuning.b("glide.desync.fix", true)
-            && mc.player.age - startSentAge > Tuning.i("glide.confirm.ticks", 20)) {
+        if (mc.player.isFallFlying() && srvGlide == 0 && srvSeenTrue && pendingStartAge < 0 && Tuning.b("glide.desync.fix", true)
+            && mc.player.tickCount - startSentAge > Tuning.i("glide.confirm.ticks", 20)) {
             desyncFixes++;
-            LOG.info("[VG] glide desync #{} at ({}): the server doesn't have us gliding - closing the elytra here and opening it again", desyncFixes, v(mc.player.getEntityPos()));
-            mc.player.stopGliding();
-            startSentAge = mc.player.age;
+            LOG.info("[VG] glide desync #{} at ({}): the server doesn't have us gliding - closing the elytra here and opening it again", desyncFixes, v(mc.player.position()));
+            mc.player.stopFallFlying();
+            startSentAge = mc.player.tickCount;
         }
 
-        boolean gliding = mc.player.isGliding();
-        Vec3d pos = mc.player.getEntityPos();
+        boolean gliding = mc.player.isFallFlying();
+        Vec3 pos = mc.player.position();
 
         // portals are looked for on every flight (and logged); we only divert to one when portal-stop is on - in the
         // module's settings, or forced with "portal.stop = true" in the tuning file
         boolean portalStopOn = portalStop.get() || Tuning.b("portal.stop", false);
         if (!divertedToPortal && !emergencyLanding && (phase == Phase.Flying || phase == Phase.TakeOff)) scanForPortals(pos, portalStopOn);
-        if (gliding && phase == Phase.Flying && lastMoveEventAge >= 0 && mc.player.age - lastMoveEventAge > 1) {
-            history.addLast("t" + mc.player.age + " NO MOVE EVENT since t" + lastMoveEventAge + " pos(" + v(pos) + ")");
+        if (gliding && phase == Phase.Flying && lastMoveEventAge >= 0 && mc.player.tickCount - lastMoveEventAge > 1) {
+            history.addLast("t" + mc.player.tickCount + " NO MOVE EVENT since t" + lastMoveEventAge + " pos(" + v(pos) + ")");
             while (history.size() > 40) history.pollFirst();
         }
         if (mending) updateMend(pos, gliding);
-        if (digging != null && !FlightPathfinder.blocks(mc.world, digging, mc.world.getBlockState(digging))) {
+        if (digging != null && !FlightPathfinder.blocks(mc.level, digging, mc.level.getBlockState(digging))) {
             boolean byServer = pendingBreak.containsKey(digging.asLong());
-            brokeAge.put(digging.asLong(), byServer ? mc.player.age - 1000 : mc.player.age);
-            if (!byServer) lastBrokeAge = mc.player.age;
+            brokeAge.put(digging.asLong(), byServer ? mc.player.tickCount - 1000 : mc.player.tickCount);
+            if (!byServer) lastBrokeAge = mc.player.tickCount;
             digging = null;
             if (pendingBreak.size() > 200) pendingBreak.clear();
         }
@@ -967,7 +966,7 @@ public class BrainImpl implements Brain {
             // something: looking straight up/down gives it no forward speed. Every gliding tick - also while hovering to
             // dig or mend (hovering with the camera's own direction cost 4 hp every 4 s).
             double simPitch = Tuning.d("sim.pitch", 90);
-            Rotations.rotate(Float.isNaN(travelYaw) ? mc.player.getYaw() : travelYaw, simPitch < -90.5 ? mc.player.getPitch() : simPitch);
+            Rotations.rotate(Float.isNaN(travelYaw) ? mc.player.getYRot() : travelYaw, simPitch < -90.5 ? mc.player.getXRot() : simPitch);
         }
         if (gliding && phase == Phase.Flying && !watchdog(pos)) return;
 
@@ -983,9 +982,9 @@ public class BrainImpl implements Brain {
             phase = Phase.Landing;
         }
         if (phase == Phase.Landing) {
-            groundTicks = mc.player.isOnGround() ? groundTicks + 1 : 0;
+            groundTicks = mc.player.onGround() ? groundTicks + 1 : 0;
             if (groundTicks >= 2) {
-                BlockPos b = mc.player.getBlockPos();
+                BlockPos b = mc.player.blockPosition();
                 m.info("Landed at %d %d %d.", b.getX(), b.getY(), b.getZ());
                 m.toggle();
                 if (emergencyLanding) logout(String.format("Elytra worn out, no spare - landed at %d %d %d and logged out.", b.getX(), b.getY(), b.getZ()));
@@ -999,7 +998,7 @@ public class BrainImpl implements Brain {
         boolean wantForward = gliding && phase == Phase.Flying;
         if (wantForward) {
             holdingForward = true;
-            mc.options.forwardKey.setPressed(true);
+            mc.options.keyUp.setDown(true);
         }
         else releaseForward();
 
@@ -1015,7 +1014,7 @@ public class BrainImpl implements Brain {
         if (retryIn > 0) retryIn--;
         if (search != null) {
             // hovering / about to run out of path: we're not flying anyway, so search harder
-            boolean idle = path.isEmpty() || pathIdx >= path.size() - 3 || dbgOurMove.lengthSquared() < 1e-4;
+            boolean idle = path.isEmpty() || pathIdx >= path.size() - 3 || dbgOurMove.lengthSqr() < 1e-4;
             int ms = idle ? Math.max(computeMs.get(), Tuning.i("search.ms.idle", 20)) : computeMs.get();
             FlightPathfinder.Status s = search.step(ms * 1_000_000L);
             // don't sit there searching every cave: after 1.5 s (5 s when the destination is loaded) take the best so far
@@ -1031,18 +1030,18 @@ public class BrainImpl implements Brain {
     }
 
     private static int durability(ItemStack s) {
-        return s.getMaxDamage() - s.getDamage();
+        return s.getMaxDamage() - s.getDamageValue();
     }
 
     /** Swap a worn-out elytra / land before it breaks. False = stopped. */
     private boolean checkElytra() {
-        ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
+        ItemStack chest = mc.player.getItemBySlot(EquipmentSlot.CHEST);
         if (mendCooldown > 0) mendCooldown--;
         if (mending) return true;
-        if (!chest.isOf(Items.ELYTRA) || !chest.isDamageable()) return true;
+        if (!chest.is(Items.ELYTRA) || !chest.isDamageableItem()) return true;
         int dur = durability(chest);
-        if (mendWithXp.get() && dur <= mendAt.get() && mendCooldown == 0 && phase == Phase.Flying && mc.player.isGliding()
-            && EnchantmentHelper.hasAnyEnchantmentsWith(chest, EnchantmentEffectComponentTypes.REPAIR_WITH_XP)
+        if (mendWithXp.get() && dur <= mendAt.get() && mendCooldown == 0 && phase == Phase.Flying && mc.player.isFallFlying()
+            && EnchantmentHelper.has(chest, EnchantmentEffectComponents.REPAIR_WITH_XP)
             && InvUtils.find(Items.EXPERIENCE_BOTTLE).found()) {
             mending = true;
             mendTicks = 0;
@@ -1057,9 +1056,9 @@ public class BrainImpl implements Brain {
             // the freshest spare (unbreakable ones count as best)
             int min = minDurability.get(), best = -1, bestDur = min * 2;
             for (int i = 0; i < 36; i++) {
-                ItemStack st = mc.player.getInventory().getStack(i);
-                if (!st.isOf(Items.ELYTRA)) continue;
-                int d = st.isDamageable() ? durability(st) : Integer.MAX_VALUE;
+                ItemStack st = mc.player.getInventory().getItem(i);
+                if (!st.is(Items.ELYTRA)) continue;
+                int d = st.isDamageableItem() ? durability(st) : Integer.MAX_VALUE;
                 if (d > bestDur) {
                     best = i;
                     bestDur = d;
@@ -1073,7 +1072,7 @@ public class BrainImpl implements Brain {
             }
         }
 
-        if (!mc.player.isGliding() && phase == Phase.TakeOff) {
+        if (!mc.player.isFallFlying() && phase == Phase.TakeOff) {
             m.error("Elytra is at %d durability and there's no spare - not taking off.", durability(chest));
             m.toggle();
             return false;
@@ -1081,16 +1080,16 @@ public class BrainImpl implements Brain {
         if (emergencyLand.get() && !emergencyLanding && phase != Phase.Landing) {
             emergencyLanding = true;
             String was = targetString();
-            Vec3d p = mc.player.getEntityPos();
+            Vec3 p = mc.player.position();
             m.warning("Elytra at %d durability and no spare - landing here. Use .vgoto %s to carry on afterwards.", durability(chest), was);
-            go(MathHelper.floor(p.x), null, MathHelper.floor(p.z));
+            go(Mth.floor(p.x), null, Mth.floor(p.z));
         }
         return true;
     }
 
     /** No real progress for 10 s: plan again; keeps happening with nothing to wait for = give up. */
-    private boolean watchdog(Vec3d pos) {
-        double d = goalNode != null ? pos.distanceTo(Vec3d.ofBottomCenter(goalNode)) : Math.hypot(targetX.get() + 0.5 - pos.x, targetZ.get() + 0.5 - pos.z);
+    private boolean watchdog(Vec3 pos) {
+        double d = goalNode != null ? pos.distanceTo(Vec3.atBottomCenterOf(goalNode)) : Math.hypot(targetX.get() + 0.5 - pos.x, targetZ.get() + 0.5 - pos.z);
         if (d < bestProgress - 2) {
             bestProgress = d;
             noProgressTicks = 0;
@@ -1135,17 +1134,17 @@ public class BrainImpl implements Brain {
     }
 
     private boolean hasElytra() {
-        return LivingEntity.canGlideWith(mc.player.getEquippedStack(EquipmentSlot.CHEST), EquipmentSlot.CHEST);
+        return LivingEntity.canGlideUsing(mc.player.getItemBySlot(EquipmentSlot.CHEST), EquipmentSlot.CHEST);
     }
 
     private boolean swimKeys;
     private boolean tunneling;
     private final it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap brokeAge = new it.unimi.dsi.fastutil.longs.Long2IntOpenHashMap();
     private int lastBrokeAge = -10000;
-    private Vec3d digHold; // wait here: the block ahead was only just broken (the server may not have agreed yet)
-    private Vec3d groundNudge; // a small walking step to apply in the move event (after other modules, e.g. Speed)
+    private Vec3 digHold; // wait here: the block ahead was only just broken (the server may not have agreed yet)
+    private Vec3 groundNudge; // a small walking step to apply in the move event (after other modules, e.g. Speed)
     private int centerTicks;
-    private List<Vec3d> extendPath; // the path a running search is extending from its end (null: planning from where we are)
+    private List<Vec3> extendPath; // the path a running search is extending from its end (null: planning from where we are)
     private int extendIdx;
     private int trappedSearches;
     private double takeoffGroundY = Double.NaN, lastAirY = Double.NaN;
@@ -1155,12 +1154,12 @@ public class BrainImpl implements Brain {
     private void releaseSwimKeys() {
         if (!swimKeys) return;
         swimKeys = false;
-        mc.options.jumpKey.setPressed(meteordevelopment.meteorclient.utils.misc.input.Input.isPressed(mc.options.jumpKey));
-        mc.options.forwardKey.setPressed(meteordevelopment.meteorclient.utils.misc.input.Input.isPressed(mc.options.forwardKey));
+        mc.options.keyJump.setDown(meteordevelopment.meteorclient.utils.misc.input.Input.isPressed(mc.options.keyJump));
+        mc.options.keyUp.setDown(meteordevelopment.meteorclient.utils.misc.input.Input.isPressed(mc.options.keyUp));
     }
 
     private boolean glideBugged, wasGliding, exitStandable;
-    private Vec3d bugAnchor;
+    private Vec3 bugAnchor;
     private int bugTicks, bugAnchorSetbacks, stowFailAge = -10000;
 
     /**
@@ -1180,13 +1179,13 @@ public class BrainImpl implements Brain {
         digging = null;
         takeoffAnchor = null;
         takeoffStill = takeoffForce = footSetbacks = 0;
-        wasGliding = glidingLastTick = mc.player != null && mc.player.isGliding();
+        wasGliding = glidingLastTick = mc.player != null && mc.player.isFallFlying();
         // back in mid-trouble (a relog while burning): the low-health logout must not wait for another hit
         if (mc.player != null && (mc.player.isOnFire() || mc.player.isInLava())
-            && mc.player.getHealth() + mc.player.getAbsorptionAmount() <= Tuning.d("logout.hp", 8)) lastHurtAge = mc.player.age;
+            && mc.player.getHealth() + mc.player.getAbsorptionAmount() <= Tuning.d("logout.hp", 8)) lastHurtAge = mc.player.tickCount;
     }
 
-    private Vec3d lavaAnchor;
+    private Vec3 lavaAnchor;
     private int lavaStillTicks, glideCloseAge = -10000, lavaLogAge = -10000;
 
     /**
@@ -1203,8 +1202,8 @@ public class BrainImpl implements Brain {
      * True while the swim is in charge of this tick.
      */
     private boolean lavaSwim() {
-        boolean inLava = mc.player.isInLava(), gliding = mc.player.isGliding();
-        Vec3d pos = mc.player.getEntityPos();
+        boolean inLava = mc.player.isInLava(), gliding = mc.player.isFallFlying();
+        Vec3 pos = mc.player.position();
         stowedElytraSlot = -1; // (a packed elytra is put back on by the check in tick())
 
         if (!inLava || lavaOkNow) {
@@ -1215,8 +1214,8 @@ public class BrainImpl implements Brain {
             // up AT ONCE: VolytraFly's auto take-off timer starts on a jump-key press and fires on the first tick, 8 or more
             // later, that finds the key down - left down across a hop it fired back in the lava.
             if (swimKeys) {
-                mc.options.jumpKey.setPressed(false);
-                if (mc.player.isOnGround() || gliding || lavaOkNow || ++outOfLavaTicks > Tuning.i("lava.hop.ticks", 8)) releaseSwimKeys();
+                mc.options.keyJump.setDown(false);
+                if (mc.player.onGround() || gliding || lavaOkNow || ++outOfLavaTicks > Tuning.i("lava.hop.ticks", 8)) releaseSwimKeys();
             }
             return false;
         }
@@ -1235,11 +1234,11 @@ public class BrainImpl implements Brain {
                 return false; // rule 3: flying out
             }
             // rule 4: always close it on our side; the server's side is closed below (rate-limited)
-            if (mc.player.age - lavaLogAge > 20) {
-                lavaLogAge = mc.player.age;
+            if (mc.player.tickCount - lavaLogAge > 20) {
+                lavaLogAge = mc.player.tickCount;
                 LOG.info("[VG] lava: glide {} at ({}) - closing it and swimming (server gliding={})", openedHere ? "was opened in the lava" : "stuck for " + lavaStillTicks + " ticks", v(pos), srvGlide);
             }
-            mc.player.stopGliding();
+            mc.player.stopFallFlying();
             pendingStartAge = -1;
             lavaAnchor = null;
             lavaStillTicks = 0;
@@ -1248,30 +1247,30 @@ public class BrainImpl implements Brain {
         // swimming, but the server still has a glide open (the one just closed here, or one VolytraFly opened): a second
         // "start" makes it toggle that off. Only when it really is open - to a server that has none, "start" would OPEN
         // one, in lava - and not more than once a second.
-        if (srvGlide == 1 && mc.player.age - glideCloseAge > 20) {
-            glideCloseAge = mc.player.age;
-            mc.getNetworkHandler().sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
+        if (srvGlide == 1 && mc.player.tickCount - glideCloseAge > 20) {
+            glideCloseAge = mc.player.tickCount;
+            mc.getConnection().send(new ServerboundPlayerCommandPacket(mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
             LOG.info("[VG] lava: asked the server to close its glide");
         }
 
         // rule 5: swim
-        Vec3d exit = lavaExit(pos);
-        Vec3d aim = exit;
+        Vec3 exit = lavaExit(pos);
+        Vec3 aim = exit;
         if (exit == null || !exitStandable) {
             // no shore in reach: swim up to the surface, then along it towards where we're going
             double dx = targetX.get() + 0.5 - pos.x, dz = targetZ.get() + 0.5 - pos.z, l = Math.hypot(dx, dz);
             if (exit != null && exit.y > pos.y + 1.2) aim = exit;
-            else if (l > 1) aim = new Vec3d(pos.x + dx / l * 6, pos.y, pos.z + dz / l * 6);
+            else if (l > 1) aim = new Vec3(pos.x + dx / l * 6, pos.y, pos.z + dz / l * 6);
         }
         BlockPos dig = null;
         if (aim != null) {
-            Vec3d d = aim.subtract(pos);
+            Vec3 d = aim.subtract(pos);
             double l = Math.hypot(d.x, d.z);
-            if (l > 0.05) mc.player.setYaw((float) Math.toDegrees(Math.atan2(-d.x, d.z)));
+            if (l > 0.05) mc.player.setYRot((float) Math.toDegrees(Math.atan2(-d.x, d.z)));
             if (mc.player.horizontalCollision && l > 0.6) {
                 for (double h : new double[] {1.0, 0.2}) {
-                    BlockPos b = BlockPos.ofFloored(pos.x + d.x / l * 0.8, pos.y + h, pos.z + d.z / l * 0.8);
-                    if (exitStandable && exit != null && b.getY() < MathHelper.floor(exit.y)) continue; // that's the shore itself
+                    BlockPos b = BlockPos.containing(pos.x + d.x / l * 0.8, pos.y + h, pos.z + d.z / l * 0.8);
+                    if (exitStandable && exit != null && b.getY() < Mth.floor(exit.y)) continue; // that's the shore itself
                     if (swimDiggable(b)) {
                         dig = b;
                         break;
@@ -1280,28 +1279,28 @@ public class BrainImpl implements Brain {
             }
         }
         if (dig == null && (aim == null || aim.y > pos.y + 1.5)) {
-            BlockPos above = BlockPos.ofFloored(pos.x, pos.y + 1.9, pos.z);
+            BlockPos above = BlockPos.containing(pos.x, pos.y + 1.9, pos.z);
             if (swimDiggable(above)) dig = above;
         }
-        boolean eating = mc.player.isUsingItem() || mc.options.useKey.isPressed();
+        boolean eating = mc.player.isUsingItem() || mc.options.keyUse.isDown();
         if (dig != null && !eating) dig(dig);
         swimKeys = true;
-        BlockPos feetCell = BlockPos.ofFloored(pos.x, pos.y + 0.1, pos.z);
-        boolean submerged = !mc.world.getBlockState(feetCell).getFluidState().isEmpty();
-        mc.options.jumpKey.setPressed((submerged || aim == null || aim.y > pos.y + 0.6) && mc.player.age % 6 != 0); // (rule 2)
-        mc.options.forwardKey.setPressed(aim != null && Math.hypot(aim.x - pos.x, aim.z - pos.z) > 0.06);
-        if (mc.player.age % 20 == 0) LOG.info("[VG] lava swim: pos=({}) exit={} standable={} dig={} eating={} onGround={} hp={}", v(pos), exit == null ? "none" : v(exit),
-            exitStandable, dig, eating, mc.player.isOnGround(), String.format("%.1f", mc.player.getHealth()));
+        BlockPos feetCell = BlockPos.containing(pos.x, pos.y + 0.1, pos.z);
+        boolean submerged = !mc.level.getBlockState(feetCell).getFluidState().isEmpty();
+        mc.options.keyJump.setDown((submerged || aim == null || aim.y > pos.y + 0.6) && mc.player.tickCount % 6 != 0); // (rule 2)
+        mc.options.keyUp.setDown(aim != null && Math.hypot(aim.x - pos.x, aim.z - pos.z) > 0.06);
+        if (mc.player.tickCount % 20 == 0) LOG.info("[VG] lava swim: pos=({}) exit={} standable={} dig={} eating={} onGround={} hp={}", v(pos), exit == null ? "none" : v(exit),
+            exitStandable, dig, eating, mc.player.onGround(), String.format("%.1f", mc.player.getHealth()));
         return true;
     }
 
     /** Lava or something solid within n blocks below. */
-    private boolean surfaceBelow(Vec3d pos, int n) {
-        BlockPos.Mutable q = new BlockPos.Mutable();
+    private boolean surfaceBelow(Vec3 pos, int n) {
+        BlockPos.MutableBlockPos q = new BlockPos.MutableBlockPos();
         for (int i = 0; i <= n; i++) {
-            q.set(MathHelper.floor(pos.x), MathHelper.floor(pos.y) - i, MathHelper.floor(pos.z));
-            BlockState st = mc.world.getBlockState(q);
-            if (!st.getFluidState().isEmpty() || !st.getCollisionShape(mc.world, q).isEmpty()) return true;
+            q.set(Mth.floor(pos.x), Mth.floor(pos.y) - i, Mth.floor(pos.z));
+            BlockState st = mc.level.getBlockState(q);
+            if (!st.getFluidState().isEmpty() || !st.getCollisionShape(mc.level, q).isEmpty()) return true;
         }
         return false;
     }
@@ -1311,41 +1310,41 @@ public class BrainImpl implements Brain {
 
     /** Dig-out rule when wedged: breakable, and no fluid above it or level with it on any side (below is fine). */
     private boolean stuckDiggable(BlockPos b) {
-        BlockState st = mc.world.getBlockState(b);
-        if (st.getCollisionShape(mc.world, b).isEmpty() || st.hasBlockEntity() || noMine.contains(b.asLong())) return false;
-        float h = st.getHardness(mc.world, b);
+        BlockState st = mc.level.getBlockState(b);
+        if (st.getCollisionShape(mc.level, b).isEmpty() || st.hasBlockEntity() || noMine.contains(b.asLong())) return false;
+        float h = st.getDestroySpeed(mc.level, b);
         if (h < 0 || h >= 20) return false;
-        for (BlockPos n : new BlockPos[] {b.up(), b.north(), b.south(), b.east(), b.west()}) {
-            if (!mc.world.getBlockState(n).getFluidState().isEmpty()) return false;
+        for (BlockPos n : new BlockPos[] {b.above(), b.north(), b.south(), b.east(), b.west()}) {
+            if (!mc.level.getBlockState(n).getFluidState().isEmpty()) return false;
         }
-        return !(mc.world.getBlockState(b.up()).getBlock() instanceof net.minecraft.block.FallingBlock);
+        return !(mc.level.getBlockState(b.above()).getBlock() instanceof net.minecraft.world.level.block.FallingBlock);
     }
 
     /** Is there room to open the elytra here: 3 clear blocks above the floor, 2 clear ahead, no lava touching. */
     private boolean roomToTakeOff(BlockPos feet) {
         for (int i = 0; i < 3; i++) {
-            BlockPos c = feet.up(i);
-            if (FlightPathfinder.blocks(mc.world, c, mc.world.getBlockState(c))) return false;
+            BlockPos c = feet.above(i);
+            if (FlightPathfinder.blocks(mc.level, c, mc.level.getBlockState(c))) return false;
         }
         int open = 0;
-        for (net.minecraft.util.math.Direction d : net.minecraft.util.math.Direction.Type.HORIZONTAL) {
-            BlockPos a = feet.offset(d).up();
-            if (!FlightPathfinder.blocks(mc.world, a, mc.world.getBlockState(a)) && !FlightPathfinder.blocks(mc.world, a.up(), mc.world.getBlockState(a.up()))) open++;
+        for (net.minecraft.core.Direction d : net.minecraft.core.Direction.Plane.HORIZONTAL) {
+            BlockPos a = feet.relative(d).above();
+            if (!FlightPathfinder.blocks(mc.level, a, mc.level.getBlockState(a)) && !FlightPathfinder.blocks(mc.level, a.above(), mc.level.getBlockState(a.above()))) open++;
         }
         return open >= 1;
     }
 
     /** The next block to dig to get take-off room here (up first, then towards where we're going); null if none. */
     private BlockPos roomDigTarget(BlockPos feet) {
-        for (int i = 1; i <= 2; i++) if (stuckDiggable(feet.up(i))) return feet.up(i);
+        for (int i = 1; i <= 2; i++) if (stuckDiggable(feet.above(i))) return feet.above(i);
         double dx = targetX.get() + 0.5 - mc.player.getX(), dz = targetZ.get() + 0.5 - mc.player.getZ();
-        net.minecraft.util.math.Direction first = Math.abs(dx) > Math.abs(dz)
-            ? (dx > 0 ? net.minecraft.util.math.Direction.EAST : net.minecraft.util.math.Direction.WEST)
-            : (dz > 0 ? net.minecraft.util.math.Direction.SOUTH : net.minecraft.util.math.Direction.NORTH);
-        net.minecraft.util.math.Direction[] order = {first, first.rotateYClockwise(), first.rotateYCounterclockwise(), first.getOpposite()};
-        for (net.minecraft.util.math.Direction d : order) {
+        net.minecraft.core.Direction first = Math.abs(dx) > Math.abs(dz)
+            ? (dx > 0 ? net.minecraft.core.Direction.EAST : net.minecraft.core.Direction.WEST)
+            : (dz > 0 ? net.minecraft.core.Direction.SOUTH : net.minecraft.core.Direction.NORTH);
+        net.minecraft.core.Direction[] order = {first, first.getClockWise(), first.getCounterClockWise(), first.getOpposite()};
+        for (net.minecraft.core.Direction d : order) {
             for (int i = 2; i >= 1; i--) {
-                BlockPos c = feet.offset(d).up(i);
+                BlockPos c = feet.relative(d).above(i);
                 if (stuckDiggable(c)) return c;
             }
         }
@@ -1353,22 +1352,22 @@ public class BrainImpl implements Brain {
     }
 
     private boolean swimDiggable(BlockPos b) {
-        BlockState st = mc.world.getBlockState(b);
-        if (st.getCollisionShape(mc.world, b).isEmpty() || st.hasBlockEntity()) return false;
-        float h = st.getHardness(mc.world, b);
+        BlockState st = mc.level.getBlockState(b);
+        if (st.getCollisionShape(mc.level, b).isEmpty() || st.hasBlockEntity()) return false;
+        float h = st.getDestroySpeed(mc.level, b);
         return h >= 0 && h < 50 && !noMine.contains(b.asLong());
     }
 
-    private Vec3d exitCache;
+    private Vec3 exitCache;
     private int exitCacheAge = -1000;
 
     /** Nearest open (no fluid, 2 high) spot within 12 blocks / 30 up, much preferring one you can stand on; null if none. */
-    private Vec3d lavaExit(Vec3d pos) {
-        if (mc.player.age - exitCacheAge < 20 && mc.player.age >= exitCacheAge) return exitCache;
-        exitCacheAge = mc.player.age;
-        BlockPos f = BlockPos.ofFloored(pos);
-        BlockPos.Mutable q = new BlockPos.Mutable();
-        Vec3d best = null;
+    private Vec3 lavaExit(Vec3 pos) {
+        if (mc.player.tickCount - exitCacheAge < 20 && mc.player.tickCount >= exitCacheAge) return exitCache;
+        exitCacheAge = mc.player.tickCount;
+        BlockPos f = BlockPos.containing(pos);
+        BlockPos.MutableBlockPos q = new BlockPos.MutableBlockPos();
+        Vec3 best = null;
         boolean bestStand = false;
         double bestScore = Double.MAX_VALUE;
         // how high the lava goes above us: a shore counts only if it is no more than a block above that surface (a ledge
@@ -1376,7 +1375,7 @@ public class BrainImpl implements Brain {
         int surfaceY = f.getY();
         for (int up = 0; up < 30; up++) {
             q.set(f.getX(), f.getY() + up, f.getZ());
-            if (!mc.world.getBlockState(q).getFluidState().isIn(FluidTags.LAVA)) break;
+            if (!mc.level.getBlockState(q).getFluidState().is(FluidTags.LAVA)) break;
             surfaceY = f.getY() + up + 1;
         }
         for (int dy = -2; dy <= 30; dy++) {
@@ -1387,19 +1386,19 @@ public class BrainImpl implements Brain {
                     if (dist + 0 >= bestScore) continue;
                     int x = f.getX() + dx, y = f.getY() + dy, z = f.getZ() + dz;
                     q.set(x, y, z);
-                    BlockState a = mc.world.getBlockState(q);
-                    if (!a.getFluidState().isEmpty() || !a.getCollisionShape(mc.world, q).isEmpty()) continue;
+                    BlockState a = mc.level.getBlockState(q);
+                    if (!a.getFluidState().isEmpty() || !a.getCollisionShape(mc.level, q).isEmpty()) continue;
                     q.set(x, y + 1, z);
-                    BlockState h = mc.world.getBlockState(q);
-                    if (!h.getFluidState().isEmpty() || !h.getCollisionShape(mc.world, q).isEmpty()) continue;
+                    BlockState h = mc.level.getBlockState(q);
+                    if (!h.getFluidState().isEmpty() || !h.getCollisionShape(mc.level, q).isEmpty()) continue;
                     q.set(x, y - 1, z);
-                    BlockState below = mc.world.getBlockState(q);
-                    boolean stand = below.getFluidState().isEmpty() && !below.getCollisionShape(mc.world, q).isEmpty() && y <= surfaceY + 1;
+                    BlockState below = mc.level.getBlockState(q);
+                    boolean stand = below.getFluidState().isEmpty() && !below.getCollisionShape(mc.level, q).isEmpty() && y <= surfaceY + 1;
                     double score = dist + (stand ? 0 : Tuning.d("lava.exit.air.penalty", 40)) + (dy < 0 ? 4 : 0);
                     if (stand) {
-                        for (net.minecraft.util.math.Direction dd : net.minecraft.util.math.Direction.Type.HORIZONTAL) {
-                            q.set(x + dd.getOffsetX(), y, z + dd.getOffsetZ());
-                            if (!mc.world.getBlockState(q).getFluidState().isEmpty()) {
+                        for (net.minecraft.core.Direction dd : net.minecraft.core.Direction.Plane.HORIZONTAL) {
+                            q.set(x + dd.getStepX(), y, z + dd.getStepZ());
+                            if (!mc.level.getBlockState(q).getFluidState().isEmpty()) {
                                 score += 3;
                                 break;
                             }
@@ -1407,7 +1406,7 @@ public class BrainImpl implements Brain {
                     }
                     if (score < bestScore) {
                         bestScore = score;
-                        best = new Vec3d(x + 0.5, y + 0.1, z + 0.5);
+                        best = new Vec3(x + 0.5, y + 0.1, z + 0.5);
                         bestStand = stand;
                     }
                 }
@@ -1419,18 +1418,18 @@ public class BrainImpl implements Brain {
     }
 
     /** Like clearLine but only solid blocks count (we're already in a fluid). */
-    private boolean clearSolid(Vec3d a, Vec3d b) {
-        Box box = new Box(a.x - 0.3, a.y, a.z - 0.3, a.x + 0.3, a.y + 0.6, a.z + 0.3);
-        Vec3d d = b.subtract(a);
+    private boolean clearSolid(Vec3 a, Vec3 b) {
+        AABB box = new AABB(a.x - 0.3, a.y, a.z - 0.3, a.x + 0.3, a.y + 0.6, a.z + 0.3);
+        Vec3 d = b.subtract(a);
         int n = Math.max(1, (int) Math.ceil(d.length() / 0.3));
-        BlockPos.Mutable q = new BlockPos.Mutable();
+        BlockPos.MutableBlockPos q = new BlockPos.MutableBlockPos();
         for (int i = 1; i <= n; i++) {
-            Box bb = box.offset(d.multiply(i / (double) n));
-            for (int x = MathHelper.floor(bb.minX); x <= MathHelper.ceil(bb.maxX) - 1; x++)
-                for (int y = MathHelper.floor(bb.minY); y <= MathHelper.ceil(bb.maxY) - 1; y++)
-                    for (int z = MathHelper.floor(bb.minZ); z <= MathHelper.ceil(bb.maxZ) - 1; z++) {
+            AABB bb = box.move(d.scale(i / (double) n));
+            for (int x = Mth.floor(bb.minX); x <= Mth.ceil(bb.maxX) - 1; x++)
+                for (int y = Mth.floor(bb.minY); y <= Mth.ceil(bb.maxY) - 1; y++)
+                    for (int z = Mth.floor(bb.minZ); z <= Mth.ceil(bb.maxZ) - 1; z++) {
                         q.set(x, y, z);
-                        if (!mc.world.getBlockState(q).getCollisionShape(mc.world, q).isEmpty()) return false;
+                        if (!mc.level.getBlockState(q).getCollisionShape(mc.level, q).isEmpty()) return false;
                     }
         }
         return true;
@@ -1440,18 +1439,18 @@ public class BrainImpl implements Brain {
         if (phase != Phase.TakeOff) phase = Phase.TakeOff;
         if (takeoffWait > 0) takeoffWait--;
         // never just stand there: on the ground in one spot for 5 s -> say what we were doing, then plain jump-and-open
-        Vec3d tp = mc.player.getEntityPos();
+        Vec3 tp = mc.player.position();
         // (1.5 blocks: shuffling half a block and being pulled back, three times a second for minutes, kept resetting a
         // 0.4-block anchor)
         if (takeoffAnchor != null && tp.distanceTo(takeoffAnchor) < Tuning.d("takeoff.stuck.radius", 1.5)) {
-            if (mc.player.isOnGround()) takeoffStill++;
+            if (mc.player.onGround()) takeoffStill++;
         }
         else {
             takeoffAnchor = tp;
             takeoffStill = 0;
         }
-        if (takeoffStill > 0 && takeoffStill % 40 == 0 && mc.player.isOnGround()) LOG.info("[VG] takeoff: on the ground at ({}) for {} ticks - {}", v(tp), takeoffStill, takeoffDoing);
-        if (takeoffStill == Tuning.i("takeoff.stuck.ticks", 60) && mc.player.isOnGround()) {
+        if (takeoffStill > 0 && takeoffStill % 40 == 0 && mc.player.onGround()) LOG.info("[VG] takeoff: on the ground at ({}) for {} ticks - {}", v(tp), takeoffStill, takeoffDoing);
+        if (takeoffStill == Tuning.i("takeoff.stuck.ticks", 60) && mc.player.onGround()) {
             takeoffStill++;
             snapAge = -10000;
             snapshot("standing still in take-off: " + takeoffDoing);
@@ -1465,22 +1464,22 @@ public class BrainImpl implements Brain {
         boolean force = takeoffForce > 0;
         takeoffDoing = "nothing";
         // no headroom to take off here (low tunnel / cave): walk along the path, digging, until there is
-        if (mc.player.isOnGround()) {
-            BlockPos fc = BlockPos.ofFloored(mc.player.getX(), mc.player.getY() + 0.2, mc.player.getZ());
-            boolean roomHere = mc.world.isSpaceEmpty(mc.player, mc.player.getBoundingBox().stretch(0, 1.3, 0)) && roomToTakeOff(fc);
+        if (mc.player.onGround()) {
+            BlockPos fc = BlockPos.containing(mc.player.getX(), mc.player.getY() + 0.2, mc.player.getZ());
+            boolean roomHere = mc.level.noCollision(mc.player, mc.player.getBoundingBox().expandTowards(0, 1.3, 0)) && roomToTakeOff(fc);
             noRoomTicks = roomHere ? 0 : noRoomTicks + 1;
         }
-        boolean crawlingNow = mc.player.getBoundingBox().getLengthY() < 1.0;
+        boolean crawlingNow = mc.player.getBoundingBox().getYsize() < 1.0;
         // On the ground with rock to dig within the next few steps of the route: stay on foot and dig through it (one hit
         // a block) rather than open 3 blocks of headroom, take off, dig one block in the air five times slower, have the
         // server close the elytra in the hole, land, and start again - which is what 20% of the time went on in solid
         // rock.
         boolean rockAhead = false;
-        if (mc.player.isOnGround() && mineThrough.get() && !force && Tuning.b("walk.rock.ahead", false) && path.size() - pathIdx > 1) {
+        if (mc.player.onGround() && mineThrough.get() && !force && Tuning.b("walk.rock.ahead", false) && path.size() - pathIdx > 1) {
             int i0 = nearestIndex(tp, Math.max(0, pathIdx - 4), Math.min(path.size(), pathIdx + 8));
             for (int k = i0 + 1; k <= Math.min(path.size() - 1, i0 + Tuning.i("walk.rock.nodes", 4)); k++) {
-                BlockPos c = BlockPos.ofFloored(path.get(k));
-                if (plannedMine.contains(c.asLong()) && FlightPathfinder.blocks(mc.world, c, mc.world.getBlockState(c))) {
+                BlockPos c = BlockPos.containing(path.get(k));
+                if (plannedMine.contains(c.asLong()) && FlightPathfinder.blocks(mc.level, c, mc.level.getBlockState(c))) {
                     rockAhead = true;
                     break;
                 }
@@ -1488,13 +1487,13 @@ public class BrainImpl implements Brain {
         }
         // just dropped out of a glide onto the floor: stand still for a few ticks first. Setting off at once got every step
         // pulled back to where the glide had ended (a few centimetres up in the air) until the 5-pull-backs rule cut in.
-        footTicks = mc.player.isOnGround() ? footTicks + 1 : 0;
+        footTicks = mc.player.onGround() ? footTicks + 1 : 0;
         boolean settled = footTicks >= Tuning.i("walk.settle.ticks", 5);
-        if (!settled && mc.player.isOnGround() && (tunneling || crawlingNow)) {
+        if (!settled && mc.player.onGround() && (tunneling || crawlingNow)) {
             takeoffDoing = "settling on the ground before walking";
             return;
         }
-        if ((!force || crawlingNow) && (tunneling || crawlingNow || rockAhead || noRoomTicks > Tuning.i("walk.noroom.ticks", 20)) && mineThrough.get() && mc.player.isOnGround() && walkTunnel()) {
+        if ((!force || crawlingNow) && (tunneling || crawlingNow || rockAhead || noRoomTicks > Tuning.i("walk.noroom.ticks", 20)) && mineThrough.get() && mc.player.onGround() && walkTunnel()) {
             takeoffDoing = "walking the tunnel (path " + pathIdx + "/" + path.size() + ", tunneling=" + tunneling + ", crawling=" + crawlingNow + ", noRoom=" + noRoomTicks + ")";
             return;
         }
@@ -1502,25 +1501,25 @@ public class BrainImpl implements Brain {
             takeoffDoing = "crawling: opening the block above";
             // in a 1-high gap and nothing to crawl along (the path goes up/down or has ended): don't try to fly from
             // here - open the block above so we can stand, the normal logic takes over from there
-            if (mc.player.isOnGround()) {
+            if (mc.player.onGround()) {
                 // what keeps us from standing up isn't always the block straight above: standing off-centre, it's the one
                 // over the NEXT column (7 s on the ground, "opening the block above" - which was air)
                 double px = mc.player.getX(), py = mc.player.getY(), pz = mc.player.getZ();
-                BlockPos feetC = BlockPos.ofFloored(px, py + 0.2, pz);
+                BlockPos feetC = BlockPos.containing(px, py + 0.2, pz);
                 BlockPos t = null;
-                for (BlockPos b : BlockPos.iterate(MathHelper.floor(px - 0.3), MathHelper.floor(py + 0.61), MathHelper.floor(pz - 0.3),
-                    MathHelper.floor(px + 0.3), MathHelper.floor(py + 1.79), MathHelper.floor(pz + 0.3))) {
-                    if (FlightPathfinder.blocks(mc.world, b, mc.world.getBlockState(b)) && stuckDiggable(b)) {
-                        t = b.toImmutable();
+                for (BlockPos b : BlockPos.betweenClosed(Mth.floor(px - 0.3), Mth.floor(py + 0.61), Mth.floor(pz - 0.3),
+                    Mth.floor(px + 0.3), Mth.floor(py + 1.79), Mth.floor(pz + 0.3))) {
+                    if (FlightPathfinder.blocks(mc.level, b, mc.level.getBlockState(b)) && stuckDiggable(b)) {
+                        t = b.immutable();
                         break;
                     }
                 }
                 double cx = feetC.getX() + 0.5, cz = feetC.getZ() + 0.5, off = Math.hypot(cx - px, cz - pz);
-                BlockPos over = feetC.up();
-                if (!FlightPathfinder.blocks(mc.world, over, mc.world.getBlockState(over)) && off > 0.05) {
+                BlockPos over = feetC.above();
+                if (!FlightPathfinder.blocks(mc.level, over, mc.level.getBlockState(over)) && off > 0.05) {
                     // our own column is open above: just get under it
                     double sp = Math.min(0.1, off);
-                    groundNudge = new Vec3d((cx - px) / off * sp, 0, (cz - pz) / off * sp);
+                    groundNudge = new Vec3((cx - px) / off * sp, 0, (cz - pz) / off * sp);
                     takeoffDoing = "crawling: moving under the open column";
                 }
                 else if (t != null && mineThrough.get()) {
@@ -1532,24 +1531,24 @@ public class BrainImpl implements Brain {
             return;
         }
 
-        if (mc.player.isOnGround()) {
-            BlockPos feet = BlockPos.ofFloored(mc.player.getX(), mc.player.getY() + 0.2, mc.player.getZ());
+        if (mc.player.onGround()) {
+            BlockPos feet = BlockPos.containing(mc.player.getX(), mc.player.getY() + 0.2, mc.player.getZ());
             takeoffGroundY = mc.player.getY();
-            Box body = mc.player.getBoundingBox();
-            boolean headroom = mc.world.isSpaceEmpty(mc.player, body.stretch(0, 1.3, 0));
+            AABB body = mc.player.getBoundingBox();
+            boolean headroom = mc.level.noCollision(mc.player, body.expandTowards(0, 1.3, 0));
             // A low ceiling is no reason to dig: the elytra only needs us OFF the ground, and a hop of a few centimetres
             // under a 2-high ceiling is that. (Digging headroom before every take-off was the biggest single cause of
             // standing still: 7% of flight time.) One failed round of jumps and we dig after all.
             boolean lowJump = (!headroom || !roomToTakeOff(feet)) && takeoffFails < 1 && Tuning.b("takeoff.low", false)
-                && mc.world.isSpaceEmpty(mc.player, body.stretch(0, 0.15, 0));
+                && mc.level.noCollision(mc.player, body.expandTowards(0, 0.15, 0));
             if ((!headroom || !roomToTakeOff(feet)) && !lowJump) {
                 // small gap / something overhead: don't jump or open the elytra here
                 // 1) our own cell has room and we're just standing off-centre under an overhang: step to its centre
                 double cx = feet.getX() + 0.5, cz = feet.getZ() + 0.5, off = Math.hypot(cx - mc.player.getX(), cz - mc.player.getZ());
-                Box centred = body.offset(cx - mc.player.getX(), 0, cz - mc.player.getZ());
-                if (off > 0.05 && centerTicks < 60 && roomToTakeOff(feet) && mc.world.isSpaceEmpty(mc.player, centred.stretch(0, 1.3, 0))) {
+                AABB centred = body.move(cx - mc.player.getX(), 0, cz - mc.player.getZ());
+                if (off > 0.05 && centerTicks < 60 && roomToTakeOff(feet) && mc.level.noCollision(mc.player, centred.expandTowards(0, 1.3, 0))) {
                     double sp = Math.min(0.12, off);
-                    groundNudge = new Vec3d((cx - mc.player.getX()) / off * sp, 0, (cz - mc.player.getZ()) / off * sp);
+                    groundNudge = new Vec3((cx - mc.player.getX()) / off * sp, 0, (cz - mc.player.getZ()) / off * sp);
                     centerTicks++;
                     takeoffDoing = "stepping to the middle of the block";
                     return;
@@ -1557,22 +1556,22 @@ public class BrainImpl implements Brain {
                 // 2) dig what's over our head (any block the body would hit on a jump), then towards where we're going
                 if (mineThrough.get()) {
                     BlockPos t = null;
-                    Box up = body.stretch(0, 1.3, 0);
-                    for (BlockPos b : BlockPos.iterate(MathHelper.floor(up.minX), MathHelper.floor(body.maxY), MathHelper.floor(up.minZ),
-                        MathHelper.floor(up.maxX), MathHelper.floor(up.maxY), MathHelper.floor(up.maxZ))) {
+                    AABB up = body.expandTowards(0, 1.3, 0);
+                    for (BlockPos b : BlockPos.betweenClosed(Mth.floor(up.minX), Mth.floor(body.maxY), Mth.floor(up.minZ),
+                        Mth.floor(up.maxX), Mth.floor(up.maxY), Mth.floor(up.maxZ))) {
                         if (stuckDiggable(b)) {
-                            t = b.toImmutable();
+                            t = b.immutable();
                             break;
                         }
                     }
                     if (t == null) t = roomDigTarget(feet);
                     if (t != null && dig(t)) {
-                        if (mc.player.age % 40 == 0) LOG.info("[VG] takeoff: no room at {} - digging {}", feet.toShortString(), t.toShortString());
+                        if (mc.player.tickCount % 40 == 0) LOG.info("[VG] takeoff: no room at {} - digging {}", feet.toShortString(), t.toShortString());
                         takeoffDoing = "no headroom: digging " + t.toShortString();
                         return;
                     }
                 }
-                if (mc.player.age % 100 == 0) {
+                if (mc.player.tickCount % 100 == 0) {
                     snapAge = -10000;
                     snapshot("no room to take off, nothing to dig");
                 }
@@ -1586,11 +1585,11 @@ public class BrainImpl implements Brain {
                     snapAge = -10000;
                     snapshot("takeoff failed x" + takeoffFails);
                 }
-                BlockPos head = mc.player.getBlockPos().up(2);
-                if (FlightPathfinder.blocks(mc.world, head, mc.world.getBlockState(head)) && lowCeilingWarned++ == 0) {
+                BlockPos head = mc.player.blockPosition().above(2);
+                if (FlightPathfinder.blocks(mc.level, head, mc.level.getBlockState(head)) && lowCeilingWarned++ == 0) {
                     m.warning("Low ceiling - taking off may not work here.");
                 }
-                mc.player.jump();
+                mc.player.jumpFromGround();
                 takeoffWait = 10;
                 lowTakeoff = lowJump && Tuning.b("takeoff.low", false);
                 takeoffDoing = "jumped (headroom=" + headroom + (lowJump ? ", low hop" : "") + ")";
@@ -1604,43 +1603,43 @@ public class BrainImpl implements Brain {
             airStuckTicks = !Double.isNaN(lastAirY) && Math.abs(yNow - lastAirY) < 0.02 ? airStuckTicks + 1 : 0;
             lastAirY = yNow;
             if (airStuckTicks >= Tuning.i("takeoff.airstuck.ticks", 10) && !mc.player.isInLava()
-                && mc.world.isSpaceEmpty(mc.player, new Box(mc.player.getX() - 0.3, mc.player.getY(), mc.player.getZ() - 0.3,
+                && mc.level.noCollision(mc.player, new AABB(mc.player.getX() - 0.3, mc.player.getY(), mc.player.getZ() - 0.3,
                     mc.player.getX() + 0.3, mc.player.getY() + 3.0, mc.player.getZ() + 0.3))) {
                 airStuckTicks = 0;
                 takeoffGroundY = yNow;
                 takeoffWait = 10;
-                mc.player.jump();
-                LOG.info("[VG] takeoff: held in mid-air at ({}) - jumping off the unseen ground", v(mc.player.getEntityPos()));
+                mc.player.jumpFromGround();
+                LOG.info("[VG] takeoff: held in mid-air at ({}) - jumping off the unseen ground", v(mc.player.position()));
                 return;
             }
             // standing height (1.8) plus a little - with 2.5 here and 0.8 of air wanted below, a 3.1-high cave could never
             // satisfy both and the bot jumped on the spot for minutes; a failed round of jumps relaxes both
             double spaceH = takeoffFails >= 1 ? 1.0 : lowTakeoff ? 1.8 : Tuning.d("takeoff.space", 1.85);
-            Box standing = new Box(mc.player.getX() - 0.3, mc.player.getY(), mc.player.getZ() - 0.3, mc.player.getX() + 0.3, mc.player.getY() + spaceH, mc.player.getZ() + 0.3);
-            boolean space = mc.world.isSpaceEmpty(mc.player, standing);
-            boolean falling = mc.player.getVelocity().y < 0, lava = mc.player.isInLava();
+            AABB standing = new AABB(mc.player.getX() - 0.3, mc.player.getY(), mc.player.getZ() - 0.3, mc.player.getX() + 0.3, mc.player.getY() + spaceH, mc.player.getZ() + 0.3);
+            boolean space = mc.level.noCollision(mc.player, standing);
+            boolean falling = mc.player.getDeltaMovement().y < 0, lava = mc.player.isInLava();
             // real air under our feet: opening the elytra a few centimetres above the ground (falling after the server
             // closed it) just puts us down on it, and the server closes the elytra of anyone touching the ground
-            double clearBelow = -net.minecraft.entity.Entity.adjustMovementForCollisions(mc.player, new Vec3d(0, -1.0, 0), mc.player.getBoundingBox(), mc.world, java.util.List.of()).y;
+            double clearBelow = -net.minecraft.world.entity.Entity.collideBoundingBox(mc.player, new Vec3(0, -1.0, 0), mc.player.getBoundingBox(), mc.level, java.util.List.of()).y;
             // ...and never right over lava: lava doesn't stop a fall, so "clear below" was true just above a pool, the
             // elytra opened there and we sank in with it open (which bugs the glide)
             // (lava BELOW only - lavaIn() also counts lava anywhere overhead, which blocked every take-off under a lava
             // ceiling for two minutes; and give up on the rule after a failed round of jumps)
             boolean lavaUnder = false;
             if (takeoffFails < 1) {
-                Box bb = mc.player.getBoundingBox();
-                BlockPos.Mutable q = new BlockPos.Mutable();
-                int yTop = MathHelper.floor(bb.minY), yBot = MathHelper.floor(bb.minY - Tuning.d("takeoff.lava.below", 0));
-                for (int lx = MathHelper.floor(bb.minX); lx <= MathHelper.floor(bb.maxX) && !lavaUnder; lx++) {
-                    for (int lz = MathHelper.floor(bb.minZ); lz <= MathHelper.floor(bb.maxZ) && !lavaUnder; lz++) {
+                AABB bb = mc.player.getBoundingBox();
+                BlockPos.MutableBlockPos q = new BlockPos.MutableBlockPos();
+                int yTop = Mth.floor(bb.minY), yBot = Mth.floor(bb.minY - Tuning.d("takeoff.lava.below", 0));
+                for (int lx = Mth.floor(bb.minX); lx <= Mth.floor(bb.maxX) && !lavaUnder; lx++) {
+                    for (int lz = Mth.floor(bb.minZ); lz <= Mth.floor(bb.maxZ) && !lavaUnder; lz++) {
                         for (int ly = yTop; ly >= yBot; ly--) {
                             q.set(lx, ly, lz);
-                            BlockState ls = mc.world.getBlockState(q);
-                            if (ls.getFluidState().isIn(FluidTags.LAVA)) {
+                            BlockState ls = mc.level.getBlockState(q);
+                            if (ls.getFluidState().is(FluidTags.LAVA)) {
                                 lavaUnder = true;
                                 break;
                             }
-                            if (!ls.getCollisionShape(mc.world, q).isEmpty()) break; // solid ground first: fine
+                            if (!ls.getCollisionShape(mc.level, q).isEmpty()) break; // solid ground first: fine
                         }
                     }
                 }
@@ -1652,23 +1651,23 @@ public class BrainImpl implements Brain {
                 tried = true;
                 if (srvGlide == 1 && Tuning.b("glide.desync.fix", true)) {
                     // the server still has us gliding: asking again would CLOSE it - just glide on our side too
-                    mc.player.startGliding();
+                    mc.player.startFallFlying();
                     ok = true;
                     LOG.info("[VG] elytra: the server already has us gliding - joining it");
                 }
                 else {
-                    ok = mc.player.checkGliding();
-                    if (ok && Tuning.b("takeoff.two.step", true)) pendingStartAge = mc.player.age;
+                    ok = mc.player.tryToStartFallFlying();
+                    if (ok && Tuning.b("takeoff.two.step", true)) pendingStartAge = mc.player.tickCount;
                     else if (ok) {
-                        mc.getNetworkHandler().sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
-                        startSentAge = mc.player.age;
+                        mc.getConnection().send(new ServerboundPlayerCommandPacket(mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+                        startSentAge = mc.player.tickCount;
                         if (srvGlide != 1) srvGlide = 0;
                     }
                 }
             }
             if (Tuning.b("log.takeoff", false)) LOG.info("[VG] takeoff air: y={} vy={} wait={} lava={} room={} tried={} ok={} gliding={} chest={}",
-                String.format("%.2f", mc.player.getY()), String.format("%.2f", mc.player.getVelocity().y), takeoffWait, lava, room, tried, ok,
-                mc.player.isGliding(), mc.player.getEquippedStack(EquipmentSlot.CHEST).getItem());
+                String.format("%.2f", mc.player.getY()), String.format("%.2f", mc.player.getDeltaMovement().y), takeoffWait, lava, room, tried, ok,
+                mc.player.isFallFlying(), mc.player.getItemBySlot(EquipmentSlot.CHEST).getItem());
         }
     }
 
@@ -1684,14 +1683,14 @@ public class BrainImpl implements Brain {
             hoverOnly = false;
             g = fixedGoal;
         }
-        else if (mc.world.getChunkManager().isChunkLoaded(tx >> 4, tz >> 4)) {
+        else if (mc.level.getChunkSource().hasChunk(tx >> 4, tz >> 4)) {
             hoverOnly = false;
             if (arrive.get() == Arrive.Hover) g = nearestOpen(tx, targetY.get(), tz);
             else {
                 g = safeLandingNear(tx, tz, 8);
                 if (g == null) {
                     // water, lava, magma... - hover over it instead of landing on whatever is there
-                    int y = mc.world.getDimension().hasCeiling() ? mc.player.getBlockY() : mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING, tx, tz) + 3;
+                    int y = mc.level.dimensionType().hasCeiling() ? mc.player.getBlockY() : mc.level.getHeight(Heightmap.Types.MOTION_BLOCKING, tx, tz) + 3;
                     g = nearestOpen(tx, y, tz);
                     hoverOnly = g != null;
                 }
@@ -1716,7 +1715,7 @@ public class BrainImpl implements Brain {
                 for (int dx = -r; dx <= r; dx++) {
                     for (int dz = -r; dz <= r; dz++) {
                         if (Math.max(Math.abs(dy), Math.max(Math.abs(dx), Math.abs(dz))) != r) continue;
-                        if (FlightPathfinder.open(mc.world, x + dx, y + dy, z + dz)) return new BlockPos(x + dx, y + dy, z + dz);
+                        if (FlightPathfinder.open(mc.level, x + dx, y + dy, z + dz)) return new BlockPos(x + dx, y + dy, z + dz);
                     }
                 }
             }
@@ -1732,9 +1731,9 @@ public class BrainImpl implements Brain {
             for (int dz = -r; dz <= r; dz++) {
                 double dd = dx * dx + dz * dz;
                 if (dd > r * r || dd >= bestD) continue;
-                if (!mc.world.getChunkManager().isChunkLoaded((x + dx) >> 4, (z + dz) >> 4)) continue;
+                if (!mc.level.getChunkSource().hasChunk((x + dx) >> 4, (z + dz) >> 4)) continue;
                 BlockPos s = landingSpot(x + dx, z + dz);
-                if (s != null && safeFloor(s.down())) {
+                if (s != null && safeFloor(s.below())) {
                     best = s;
                     bestD = dd;
                 }
@@ -1744,45 +1743,45 @@ public class BrainImpl implements Brain {
     }
 
     private boolean safeFloor(BlockPos floor) {
-        BlockState st = mc.world.getBlockState(floor);
+        BlockState st = mc.level.getBlockState(floor);
         if (!st.getFluidState().isEmpty() || BAD_FLOOR.contains(st.getBlock())) return false;
-        if (st.getCollisionShape(mc.world, floor).isEmpty()) return false;
+        if (st.getCollisionShape(mc.level, floor).isEmpty()) return false;
         // not right next to lava / fire either
-        BlockPos up = floor.up();
+        BlockPos up = floor.above();
         for (BlockPos n : new BlockPos[] {up.north(), up.south(), up.east(), up.west()}) {
-            BlockState ns = mc.world.getBlockState(n);
+            BlockState ns = mc.level.getBlockState(n);
             FluidState fs = ns.getFluidState();
-            if (fs.isIn(FluidTags.LAVA) || ns.isOf(Blocks.FIRE) || ns.isOf(Blocks.SOUL_FIRE)) return false;
+            if (fs.is(FluidTags.LAVA) || ns.is(Blocks.FIRE) || ns.is(Blocks.SOUL_FIRE)) return false;
         }
         return true;
     }
 
     /** First spot at x z where you can stand: open air with something solid under it. */
     private BlockPos landingSpot(int x, int z) {
-        int bottom = mc.world.getBottomY(), top = mc.world.getTopYInclusive() - 1;
-        if (!mc.world.getDimension().hasCeiling()) {
-            int y = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING, x, z);
+        int bottom = mc.level.getMinY(), top = mc.level.getMaxY() - 1;
+        if (!mc.level.dimensionType().hasCeiling()) {
+            int y = mc.level.getHeight(Heightmap.Types.MOTION_BLOCKING, x, z);
             return standable(x, y, z) ? new BlockPos(x, y, z) : null;
         }
         // Nether: the heightmap is the roof - look down from our height, then up
-        int from = MathHelper.clamp(mc.player.getBlockY(), bottom + 1, top);
+        int from = Mth.clamp(mc.player.getBlockY(), bottom + 1, top);
         for (int y = from; y > bottom; y--) if (standable(x, y, z)) return new BlockPos(x, y, z);
         for (int y = from + 1; y <= top; y++) if (standable(x, y, z)) return new BlockPos(x, y, z);
         return null;
     }
 
     private boolean standable(int x, int y, int z) {
-        if (!FlightPathfinder.open(mc.world, x, y, z)) return false;
+        if (!FlightPathfinder.open(mc.level, x, y, z)) return false;
         BlockPos below = new BlockPos(x, y - 1, z);
-        return !mc.world.getBlockState(below).getCollisionShape(mc.world, below).isEmpty();
+        return !mc.level.getBlockState(below).getCollisionShape(mc.level, below).isEmpty();
     }
 
-    private boolean needReplan(Vec3d pos) {
+    private boolean needReplan(Vec3 pos) {
         if (tunneling && !path.isEmpty()) {
             if (pathIdx < path.size() - 2) return false; // digging our way out: don't swap the path
             tunneling = false;
             trappedSearches = 0;
-            tunnelEndAge = mc.player.age;
+            tunnelEndAge = mc.player.tickCount;
             return true;
         }
         if (replanNow || path.isEmpty()) return true;
@@ -1798,7 +1797,7 @@ public class BrainImpl implements Brain {
     }
 
     private int effectiveRadius() {
-        int view = Math.max(2, mc.options.getClampedViewDistance()) * 16 - 16;
+        int view = Math.max(2, mc.options.getEffectiveRenderDistance()) * 16 - 16;
         return Math.max(32, Math.min(searchRadius.get(), view));
     }
 
@@ -1814,8 +1813,8 @@ public class BrainImpl implements Brain {
         extendPath = null;
         if (!urgent && Tuning.b("search.extend", true) && !tunneling && mineModeTicks == 0 && path.size() - pathIdx > 3) {
             for (int ei = path.size() - 1; ei >= Math.max(pathIdx + 2, path.size() - 4); ei--) {
-                BlockPos c = BlockPos.ofFloored(path.get(ei));
-                if (FlightPathfinder.open(mc.world, c.getX(), c.getY(), c.getZ())) {
+                BlockPos c = BlockPos.containing(path.get(ei));
+                if (FlightPathfinder.open(mc.level, c.getX(), c.getY(), c.getZ())) {
                     start = c;
                     extendPath = path;
                     extendIdx = ei;
@@ -1823,7 +1822,7 @@ public class BrainImpl implements Brain {
                 }
             }
         }
-        int bottom = mc.world.getBottomY(), top = mc.world.getTopYInclusive() - 1;
+        int bottom = mc.level.getMinY(), top = mc.level.getMaxY() - 1;
         if (vf.limitMaxHeight.get()) top = Math.min(top, (int) Math.floor(vf.maxHeight.get()) - 1);
 
         double desiredY;
@@ -1835,32 +1834,32 @@ public class BrainImpl implements Brain {
         FlightPathfinder.LAVA_COST = Tuning.d("path.lava.cost", 20);
         FlightPathfinder.FLOOR_TOUCH = Tuning.d("path.floor.touch", 15);
         FlightPathfinder.LAVA_OK_COST = Tuning.d("path.lavaok.cost", 6);
-        if (mc.world.getDimension().hasCeiling() && tripLeft >= cruiseDistance.get()) {
-            desiredY = MathHelper.clamp(Tuning.i("nether.cruise.y", 95), bottom + 1, top - 1);
+        if (mc.level.dimensionType().hasCeiling() && tripLeft >= cruiseDistance.get()) {
+            desiredY = Mth.clamp(Tuning.i("nether.cruise.y", 95), bottom + 1, top - 1);
             yWeight = Tuning.d("nether.cruise.weight", 0.3);
         }
-        else if (mc.world.getDimension().hasCeiling() || tripLeft < cruiseDistance.get()) {
-            desiredY = MathHelper.clamp(start.getY(), bottom + 1, top - 1);
+        else if (mc.level.dimensionType().hasCeiling() || tripLeft < cruiseDistance.get()) {
+            desiredY = Mth.clamp(start.getY(), bottom + 1, top - 1);
             yWeight = 0.25;
         }
         else {
-            desiredY = MathHelper.clamp(cruiseHeight.get(), bottom + 1, top - 1);
+            desiredY = Mth.clamp(cruiseHeight.get(), bottom + 1, top - 1);
             yWeight = 1.0;
         }
 
         // hostile mobs within 64 blocks (the nearest 40): the search steers clear of them where it can
         try {
-            java.util.ArrayList<net.minecraft.entity.Entity> mobs = new java.util.ArrayList<>();
-            for (net.minecraft.entity.Entity e : mc.world.getEntities()) {
-                if (e instanceof net.minecraft.entity.mob.HostileEntity && e.isAlive() && e.squaredDistanceTo(mc.player) < 64 * 64) mobs.add(e);
+            java.util.ArrayList<net.minecraft.world.entity.Entity> mobs = new java.util.ArrayList<>();
+            for (net.minecraft.world.entity.Entity e : mc.level.entitiesForRendering()) {
+                if (e instanceof net.minecraft.world.entity.monster.Monster && e.isAlive() && e.distanceToSqr(mc.player) < 64 * 64) mobs.add(e);
             }
-            mobs.sort(java.util.Comparator.comparingDouble(e -> e.squaredDistanceTo(mc.player)));
+            mobs.sort(java.util.Comparator.comparingDouble(e -> e.distanceToSqr(mc.player)));
             int nMobs = Math.min(mobs.size(), Tuning.i("path.mob.max", 40));
             double[] dg = new double[nMobs * 3];
             for (int mi = 0; mi < nMobs; mi++) {
-                net.minecraft.entity.Entity e = mobs.get(mi);
+                net.minecraft.world.entity.Entity e = mobs.get(mi);
                 dg[mi * 3] = e.getX();
-                dg[mi * 3 + 1] = e.getY() + e.getHeight() / 2;
+                dg[mi * 3 + 1] = e.getY() + e.getBbHeight() / 2;
                 dg[mi * 3 + 2] = e.getZ();
             }
             FlightPathfinder.DANGERS = dg;
@@ -1870,24 +1869,24 @@ public class BrainImpl implements Brain {
         catch (Throwable t) {
             FlightPathfinder.DANGERS = new double[0];
         }
-        search = new FlightPathfinder(mc.world, start, goalNode, targetX.get() + 0.5, targetZ.get() + 0.5, desiredY, yWeight,
+        search = new FlightPathfinder(mc.level, start, goalNode, targetX.get() + 0.5, targetZ.get() + 0.5, desiredY, yWeight,
             effectiveRadius(), waitForChunks.get(), bottom, top, maxNodes.get(), wallAvoidance.get(), allowLowGaps.get(),
             mineModeTicks > 0 ? mineCost.get() : 0, noMine).lavaOk(lavaOkNow);
     }
 
     /** The block the player's feet are in, or the nearest open one around it. */
     private BlockPos startBlock() {
-        Vec3d p = mc.player.getEntityPos();
-        BlockPos b = BlockPos.ofFloored(p.x, p.y + 0.05, p.z);
-        if (FlightPathfinder.open(mc.world, b.getX(), b.getY(), b.getZ())) return b;
+        Vec3 p = mc.player.position();
+        BlockPos b = BlockPos.containing(p.x, p.y + 0.05, p.z);
+        if (FlightPathfinder.open(mc.level, b.getX(), b.getY(), b.getZ())) return b;
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
-        for (BlockPos q : BlockPos.iterate(b.add(-1, -1, -1), b.add(1, 1, 1))) {
-            if (!FlightPathfinder.open(mc.world, q.getX(), q.getY(), q.getZ())) continue;
-            double d = Vec3d.ofBottomCenter(q).squaredDistanceTo(p);
+        for (BlockPos q : BlockPos.betweenClosed(b.offset(-1, -1, -1), b.offset(1, 1, 1))) {
+            if (!FlightPathfinder.open(mc.level, q.getX(), q.getY(), q.getZ())) continue;
+            double d = Vec3.atBottomCenterOf(q).distanceToSqr(p);
             if (d < bestD) {
                 bestD = d;
-                best = q.toImmutable();
+                best = q.immutable();
             }
         }
         return best != null ? best : b;
@@ -1896,10 +1895,10 @@ public class BrainImpl implements Brain {
     private void searchDone(FlightPathfinder.Status s) {
         FlightPathfinder done = search;
         search = null;
-        LOG.info("[VG] search {} expanded={} pathLen={} from=({})", s, done.expanded(), done.path().size(), v(mc.player.getEntityPos()));
+        LOG.info("[VG] search {} expanded={} pathLen={} from=({})", s, done.expanded(), done.path().size(), v(mc.player.position()));
 
         if (tunneling) return; // a search that was still running when we started tunnelling
-        List<Vec3d> ext = extendPath;
+        List<Vec3> ext = extendPath;
         extendPath = null;
         if (ext != null && (ext != path || s == FlightPathfinder.Status.FAILED || done.path().size() < 2
             || (s == FlightPathfinder.Status.PARTIAL && !done.endsAtFrontier() && done.bestGain() < Tuning.d("trapped.gain", 8)))) {
@@ -1932,7 +1931,7 @@ public class BrainImpl implements Brain {
         // Just dug a tunnel to its end and the best route from here leads back the way we came (the end is still inside the
         // rock, so "closest reachable point" is somewhere behind us): don't walk the whole tunnel back - dig on. (40
         // blocks east in 33 s, then two minutes of walking back and forth in it.)
-        if (mc.player.age - tunnelEndAge < Tuning.i("tunnel.end.window", 200) && mineThrough.get()) {
+        if (mc.player.tickCount - tunnelEndAge < Tuning.i("tunnel.end.window", 200) && mineThrough.get()) {
             BlockPos lastB = done.path().get(done.path().size() - 1);
             double gx = targetX.get() + 0.5, gz = targetZ.get() + 0.5;
             double dEnd = Math.hypot(gx - (lastB.getX() + 0.5), gz - (lastB.getZ() + 0.5));
@@ -1944,16 +1943,16 @@ public class BrainImpl implements Brain {
         }
         failures = 0;
         ticksSinceSearch = 0;
-        List<Vec3d> oldPath = path;
+        List<Vec3> oldPath = path;
         int oldIdx = pathIdx;
-        ArrayList<Vec3d> pts = new ArrayList<>(done.path().size());
-        for (BlockPos b : done.path()) pts.add(new Vec3d(b.getX() + 0.5, b.getY() + NODE_Y, b.getZ() + 0.5));
+        ArrayList<Vec3> pts = new ArrayList<>(done.path().size());
+        for (BlockPos b : done.path()) pts.add(new Vec3(b.getX() + 0.5, b.getY() + NODE_Y, b.getZ() + 0.5));
         if (plannedMine.size() > 20000) plannedMine.clear();
         for (BlockPos b : done.path()) if (done.plannedMine(b)) plannedMine.add(b.asLong());
         boolean extended = false;
         if (ext != null && extendIdx < oldPath.size()) {
             int from = Math.max(0, oldIdx - 8);
-            ArrayList<Vec3d> joined = new ArrayList<>(oldPath.subList(from, Math.max(from, extendIdx)));
+            ArrayList<Vec3> joined = new ArrayList<>(oldPath.subList(from, Math.max(from, extendIdx)));
             int keep = joined.size();
             // the new piece starts on the node the kept piece ends with: one node twice made "the next node" the spot we
             // were already on - nothing to fly to, and no stuck alarm either (10 s hover)
@@ -1967,17 +1966,17 @@ public class BrainImpl implements Brain {
         pathReachesGoal = s == FlightPathfinder.Status.FOUND;
         pathEndsAtFrontier = done.endsAtFrontier();
         pathIdx = 0;
-        pathIdx = nearestIndex(mc.player.getEntityPos(), 0, extended ? Math.min(path.size(), 56) : path.size());
+        pathIdx = nearestIndex(mc.player.position(), 0, extended ? Math.min(path.size(), 56) : path.size());
         noCarrotTicks = 0;
         if (!extended && !oldPath.isEmpty() && oldPath.size() - oldIdx > 12 && path.size() - pathIdx > 12) {
             // compare where the two paths are ~12 nodes ahead
-            Vec3d newAhead = path.get(Math.min(path.size() - 1, pathIdx + 12));
+            Vec3 newAhead = path.get(Math.min(path.size() - 1, pathIdx + 12));
             double best = Double.MAX_VALUE;
             for (int i = oldIdx; i < Math.min(oldPath.size(), oldIdx + 40); i++) best = Math.min(best, oldPath.get(i).distanceTo(newAhead));
             if (best > Tuning.d("route.change.dist", 4)) {
-                Vec3d oldAhead = oldPath.get(Math.min(oldPath.size() - 1, oldIdx + 12));
+                Vec3 oldAhead = oldPath.get(Math.min(oldPath.size() - 1, oldIdx + 12));
                 LOG.info("[VG] ROUTE CHANGE at ({}): was heading to ({}), now ({}) - {} apart; search {} {} nodes",
-                    v(mc.player.getEntityPos()), v(oldAhead), v(newAhead), String.format("%.1f", best), s, done.expanded());
+                    v(mc.player.position()), v(oldAhead), v(newAhead), String.format("%.1f", best), s, done.expanded());
             }
         }
     }
@@ -1986,12 +1985,12 @@ public class BrainImpl implements Brain {
 
     @Override
     public void move(PlayerMoveEvent event) {
-        if (event.type == MovementType.SELF && mc.player != null && groundNudge != null && !mc.player.isGliding()) {
-            ((IVec3d) event.movement).meteor$set(groundNudge.x, event.movement.y, groundNudge.z);
+        if (event.type == MoverType.SELF && mc.player != null && groundNudge != null && !mc.player.isFallFlying()) {
+            ((IVec3) event.movement).meteor$set(groundNudge.x, event.movement.y, groundNudge.z);
             groundNudge = null;
             return;
         }
-        if (event.type != MovementType.SELF || mc.player == null || !mc.player.isGliding() || vf == null || !vf.isActive()) return;
+        if (event.type != MoverType.SELF || mc.player == null || !mc.player.isFallFlying() || vf == null || !vf.isActive()) return;
         // The elytra is open on our side but the server hasn't confirmed it (just opened, or the server closed it with a
         // pull-back): NEVER let VolytraFly's own move through here - that's its full speed from a standstill, the server
         // rejects it, stays where it was (on the ground) and refuses the elytra. Just sink until it's really open.
@@ -1999,45 +1998,45 @@ public class BrainImpl implements Brain {
         if (phase == Phase.TakeOff || !confirmed) {
             // (hover: sinking here put us back on the ground after a jump take-off - and the server closes the elytra of
             // anyone touching the ground)
-            Vec3d sinkMove = new Vec3d(0, -Tuning.d("glide.wait.sink", 0.0), 0);
-            Vec3d adj = net.minecraft.entity.Entity.adjustMovementForCollisions(mc.player, sinkMove, mc.player.getBoundingBox(), mc.world, java.util.List.of());
-            ((IVec3d) event.movement).meteor$set(0, adj.y, 0);
-            dbgOurMove = new Vec3d(0, adj.y, 0);
+            Vec3 sinkMove = new Vec3(0, -Tuning.d("glide.wait.sink", 0.0), 0);
+            Vec3 adj = net.minecraft.world.entity.Entity.collideBoundingBox(mc.player, sinkMove, mc.player.getBoundingBox(), mc.level, java.util.List.of());
+            ((IVec3) event.movement).meteor$set(0, adj.y, 0);
+            dbgOurMove = new Vec3(0, adj.y, 0);
             lastCmd = dbgOurMove;
             lastCmdSpeed = Math.abs(adj.y);
             curSpeed = 0;
             curV = 0;
             lastMovePos = null;
-            lastMoveEventAge = mc.player.age;
+            lastMoveEventAge = mc.player.tickCount;
             unconfirmedTicks++;
-            mc.player.setVelocity(0, 0, 0);
-            history.addLast("t" + mc.player.age + " pos(" + v(mc.player.getEntityPos()) + ") waiting for the server to open the elytra (srv=" + srvGlide + ")");
+            mc.player.setDeltaMovement(0, 0, 0);
+            history.addLast("t" + mc.player.tickCount + " pos(" + v(mc.player.position()) + ") waiting for the server to open the elytra (srv=" + srvGlide + ")");
             while (history.size() > 40) history.pollFirst();
             return;
         }
-        if (lastMoveEventAge != mc.player.age - 1) {
-            lastCmd = new Vec3d(event.movement.x, event.movement.y, event.movement.z);
-            if (lastCmd.length() > 1.0) lastCmd = lastCmd.multiply(1.0 / lastCmd.length());
+        if (lastMoveEventAge != mc.player.tickCount - 1) {
+            lastCmd = new Vec3(event.movement.x, event.movement.y, event.movement.z);
+            if (lastCmd.length() > 1.0) lastCmd = lastCmd.scale(1.0 / lastCmd.length());
             lastCmdSpeed = lastCmd.length();
             lastMovePos = null;
             stallTicks = 0;
         }
-        lastMoveEventAge = mc.player.age;
-        dbgVfMove = new Vec3d(event.movement.x, event.movement.y, event.movement.z);
+        lastMoveEventAge = mc.player.tickCount;
+        dbgVfMove = new Vec3(event.movement.x, event.movement.y, event.movement.z);
         double sink = keepVfSink.get() && dbgVfMove.y < 0 && dbgVfMove.y > -Tuning.d("sink.max", 0.5) ? dbgVfMove.y : 0;
         sink = Math.min(sink, -Tuning.d("sink.min", 0)); // optional forced minimum sink // VolytraFly's own glide sink
         if (setbackTicks > 0) {
-            ((IVec3d) event.movement).meteor$set(0, sink, 0);
-            dbgOurMove = new Vec3d(0, sink, 0);
+            ((IVec3) event.movement).meteor$set(0, sink, 0);
+            dbgOurMove = new Vec3(0, sink, 0);
             lastCmdSpeed = Math.abs(sink);
-            lastCmd = new Vec3d(0, sink, 0);
-            history.addLast("t" + mc.player.age + " pos(" + v(mc.player.getEntityPos()) + ") setback pause" + (mc.player.horizontalCollision ? " HC" : ""));
+            lastCmd = new Vec3(0, sink, 0);
+            history.addLast("t" + mc.player.tickCount + " pos(" + v(mc.player.position()) + ") setback pause" + (mc.player.horizontalCollision ? " HC" : ""));
             while (history.size() > 40) history.pollFirst();
             return;
         }
 
-        Vec3d pos = mc.player.getEntityPos();
-        Vec3d mv = event.movement;
+        Vec3 pos = mc.player.position();
+        Vec3 mv = event.movement;
 
         // pushing but hardly moving (caught on a block corner): line up on the block grid and go one axis at a time
         if (lastMovePos != null && lastWant.length() > 0.3) {
@@ -2062,12 +2061,12 @@ public class BrainImpl implements Brain {
         if (pairedTicks) vTop = Math.min(vTop, Tuning.d("paired.speed.cap", 1.5));
         double capT = Tuning.d("speed.cap", 0); // live experiment: hard cap (blocks/tick), 0 = none
         if (capT > 0) vTop = Math.min(vTop, capT);
-        double sH = MathHelper.clamp(curSpeed, Math.min(Math.min(vMin, vTop), Tuning.d("speed.turn.min", 0.8)), vTop); // creep / landing / digging use this as a cap only
+        double sH = Mth.clamp(curSpeed, Math.min(Math.min(vMin, vTop), Tuning.d("speed.turn.min", 0.8)), vTop); // creep / landing / digging use this as a cap only
         double vTopV = Math.min(Math.max(MIN_V, vf.verticalSpeed.get()), setbackCapV);
         if (pairedTicks) vTopV = Math.min(vTopV, Tuning.d("paired.speed.cap", 1.5));
-        double sV = MathHelper.clamp(curV, Math.min(MIN_V, vTopV), vTopV);
+        double sV = Mth.clamp(curV, Math.min(MIN_V, vTopV), vTopV);
 
-        Vec3d want;
+        Vec3 want;
         double creepSpeed = Math.min(sH, Tuning.d("creep.speed", 0.6));
         if (mineTarget != null || digOutTarget != null || creepTicks > 0 || mending) {
             curSpeed = Math.min(curSpeed, vMin);
@@ -2081,44 +2080,44 @@ public class BrainImpl implements Brain {
                 replanNow = true;
             }
             double es = Tuning.d("lava.escape.speed", 0.8);
-            Vec3d exit = lavaExit(pos);
-            Vec3d up = new Vec3d(0, es, 0);
+            Vec3 exit = lavaExit(pos);
+            Vec3 up = new Vec3(0, es, 0);
             if (exit != null) {
-                Vec3d d = exit.subtract(pos);
-                Vec3d direct = d.length() > es ? d.multiply(es / d.length()) : d;
+                Vec3 d = exit.subtract(pos);
+                Vec3 direct = d.length() > es ? d.scale(es / d.length()) : d;
                 if (clearSolid(pos, pos.add(direct))) want = direct;
                 else if (d.y > 0.2 && clearSolid(pos, pos.add(up))) want = up;
                 else {
-                    want = Vec3d.ZERO;
+                    want = Vec3.ZERO;
                     double[] c = {d.x, d.y, d.z};
-                    for (int a = 0; a < 3 && want == Vec3d.ZERO; a++) {
-                        double st = MathHelper.clamp(c[a], -es, es);
+                    for (int a = 0; a < 3 && want == Vec3.ZERO; a++) {
+                        double st = Mth.clamp(c[a], -es, es);
                         if (Math.abs(st) < 1e-3) continue;
-                        Vec3d stepV = a == 0 ? new Vec3d(st, 0, 0) : a == 1 ? new Vec3d(0, st, 0) : new Vec3d(0, 0, st);
+                        Vec3 stepV = a == 0 ? new Vec3(st, 0, 0) : a == 1 ? new Vec3(0, st, 0) : new Vec3(0, 0, st);
                         if (clearSolid(pos, pos.add(stepV))) want = stepV;
                     }
                 }
             }
-            else want = clearSolid(pos, pos.add(up)) ? up : Vec3d.ZERO;
+            else want = clearSolid(pos, pos.add(up)) ? up : Vec3.ZERO;
         }
         else if (phase == Phase.Landing) {
-            Vec3d spot = goalNode != null ? Vec3d.ofBottomCenter(goalNode) : (path.isEmpty() ? pos : path.getLast());
+            Vec3 spot = goalNode != null ? Vec3.atBottomCenterOf(goalNode) : (path.isEmpty() ? pos : path.getLast());
             sV = rampV(Math.abs(pos.y - spot.y), vTopV);
             want = landingMove(pos, sV);
         }
         else if (mending) {
-            want = Vec3d.ZERO;
+            want = Vec3.ZERO;
             if (mendBelow > 3) {
-                Vec3d down = new Vec3d(0, -Math.min(sV, Math.max(0.2, (mendBelow - 2.5) * 0.4)), 0);
+                Vec3 down = new Vec3(0, -Math.min(sV, Math.max(0.2, (mendBelow - 2.5) * 0.4)), 0);
                 if (clearLine(pos, pos.add(down), -0.01)) want = down;
             }
         }
-        else if (digOutTarget != null) want = Vec3d.ZERO;
-        else if (mineTarget != null) want = pos.distanceTo(mineFrom) > 0.02 ? creep(pos, mineFrom, creepSpeed) : Vec3d.ZERO;
-        else if (digHold != null) want = pos.distanceTo(digHold) > 0.02 ? creep(pos, digHold, creepSpeed) : Vec3d.ZERO;
+        else if (digOutTarget != null) want = Vec3.ZERO;
+        else if (mineTarget != null) want = pos.distanceTo(mineFrom) > 0.02 ? creep(pos, mineFrom, creepSpeed) : Vec3.ZERO;
+        else if (digHold != null) want = pos.distanceTo(digHold) > 0.02 ? creep(pos, digHold, creepSpeed) : Vec3.ZERO;
         else if (creepTicks > 0) want = creepAlong(pos, creepSpeed);
         else {
-            Vec3d carrot = pickCarrot(pos);
+            Vec3 carrot = pickCarrot(pos);
             dbgCarrot = carrot;
             if (carrot != null) {
                 // brake for what's ahead: clear straight way = distance to the carrot + however far the path keeps going
@@ -2145,50 +2144,50 @@ public class BrainImpl implements Brain {
             if (carrot == null) {
                 boolean atFrontierEnd = pathEndsAtFrontier && !path.isEmpty() && pos.distanceTo(path.getLast()) < 3;
                 if (!atFrontierEnd && noCarrotTicks > 3) want = creepAlong(pos, creepSpeed); // nothing in a straight line: block by block
-                else want = Vec3d.ZERO;
-                if (atFrontierEnd && mc.player.age - waitMsgAge > 200) {
-                    waitMsgAge = mc.player.age;
+                else want = Vec3.ZERO;
+                if (atFrontierEnd && mc.player.tickCount - waitMsgAge > 200) {
+                    waitMsgAge = mc.player.tickCount;
                     m.info("Waiting for chunks ahead to load...");
                 }
             }
             else if (carrotTight) want = creepAlong(pos, Math.min(sH, 1.0)); // tight spot: on the grid, one axis at a time
             else {
-                Vec3d d = carrot.subtract(pos);
+                Vec3 d = carrot.subtract(pos);
                 double dh = Math.hypot(d.x, d.z), dy = Math.abs(d.y);
                 double t = 1;
                 if (dh > 1e-4) t = Math.min(t, sH / dh);
                 if (dy > 1e-4) t = Math.min(t, sV / dy);
-                want = d.multiply(t);
+                want = d.scale(t);
             }
         }
 
         if (Math.hypot(want.x, want.z) > 0.05) {
             travelYaw = (float) Math.toDegrees(Math.atan2(-want.x, want.z));
-            if (rotate.get() == Rotate.Camera) mc.player.setYaw(travelYaw);
+            if (rotate.get() == Rotate.Camera) mc.player.setYRot(travelYaw);
         }
-        if (!escaping && sink < 0 && Math.abs(want.y) < -sink) want = new Vec3d(want.x, sink, want.z); // level / hovering: sink like VolytraFly
+        if (!escaping && sink < 0 && Math.abs(want.y) < -sink) want = new Vec3(want.x, sink, want.z); // level / hovering: sink like VolytraFly
         // ...but never sink towards lava, and don't sit right on top of it: hovering at the lava sea's surface (waiting for
         // a route) sank the bot into it - 6 hp in 2 s. Keep 1.5 blocks of air over lava while hovering/slow.
         // (only when really hovering - applied to slow descents too, it fought a route that had to go down past a lava
         // pocket and the bot bobbed on the spot)
         if (!lavaOkNow && Math.abs(want.y) <= 0.05 && Math.hypot(want.x, want.z) < 0.05) {
-            Box under = mc.player.getBoundingBox();
+            AABB under = mc.player.getBoundingBox();
             boolean lavaUnder = false;
-            BlockPos.Mutable lq = new BlockPos.Mutable();
-            for (int lx = MathHelper.floor(under.minX); lx <= MathHelper.floor(under.maxX) && !lavaUnder; lx++) {
-                for (int lz = MathHelper.floor(under.minZ); lz <= MathHelper.floor(under.maxZ) && !lavaUnder; lz++) {
-                    for (int ly = MathHelper.floor(under.minY); ly >= MathHelper.floor(under.minY - Tuning.d("hover.lava.clear", 1.5)); ly--) {
+            BlockPos.MutableBlockPos lq = new BlockPos.MutableBlockPos();
+            for (int lx = Mth.floor(under.minX); lx <= Mth.floor(under.maxX) && !lavaUnder; lx++) {
+                for (int lz = Mth.floor(under.minZ); lz <= Mth.floor(under.maxZ) && !lavaUnder; lz++) {
+                    for (int ly = Mth.floor(under.minY); ly >= Mth.floor(under.minY - Tuning.d("hover.lava.clear", 1.5)); ly--) {
                         lq.set(lx, ly, lz);
-                        BlockState ls = mc.world.getBlockState(lq);
-                        if (ls.getFluidState().isIn(FluidTags.LAVA)) {
+                        BlockState ls = mc.level.getBlockState(lq);
+                        if (ls.getFluidState().is(FluidTags.LAVA)) {
                             lavaUnder = true;
                             break;
                         }
-                        if (!ls.getCollisionShape(mc.world, lq).isEmpty()) break;
+                        if (!ls.getCollisionShape(mc.level, lq).isEmpty()) break;
                     }
                 }
             }
-            if (lavaUnder) want = new Vec3d(want.x, Tuning.d("hover.lava.rise", 0.15), want.z);
+            if (lavaUnder) want = new Vec3(want.x, Tuning.d("hover.lava.rise", 0.15), want.z);
         }
         double len = want.length();
         // the server rejects a move whose speed rose too much over the previous one, and the faster we are the smaller
@@ -2205,7 +2204,7 @@ public class BrainImpl implements Brain {
             lim = Math.min(lim, Tuning.d("setback.slow.speed", 1.5));
         }
         lim = Math.max(lim, Tuning.d("accel.floor", 0.2));
-        if (len > lim && len > 1e-6) want = want.multiply(lim / len);
+        if (len > lim && len > 1e-6) want = want.scale(lim / len);
         // the same limit on the HORIZONTAL speed alone: levelling out of a climb kept the total speed steady while the
         // horizontal part jumped 2.84 -> 3.16 in one tick, and the server pulled us back
         double hPrev = Math.hypot(lastCmd.x, lastCmd.z), hWantNow = Math.hypot(want.x, want.z);
@@ -2213,15 +2212,15 @@ public class BrainImpl implements Brain {
             ? Math.min(hPrev + Tuning.d("accel.max", 0.1) * ps, Math.max(freeSpeed, hPrev + accHigh))
             : hPrev + accHigh;
         limH = Math.max(limH, Tuning.d("accel.floor", 0.2));
-        if (hWantNow > limH && hWantNow > 1e-6 && Tuning.b("accel.horizontal", true)) want = new Vec3d(want.x * limH / hWantNow, want.y, want.z * limH / hWantNow);
+        if (hWantNow > limH && hWantNow > 1e-6 && Tuning.b("accel.horizontal", true)) want = new Vec3(want.x * limH / hWantNow, want.y, want.z * limH / hWantNow);
         double dvMax = Tuning.d("dv.max", 0.2) * ps;
-        Vec3d dv = want.subtract(lastCmd);
+        Vec3 dv = want.subtract(lastCmd);
         if (!escaping && dvMax > 0 && dv.length() > dvMax && lastCmd.length() > Tuning.d("dv.free.below", 0.25)) { // crawling: free to line up
-            Vec3d limited = lastCmd.add(dv.multiply(dvMax / dv.length()));
+            Vec3 limited = lastCmd.add(dv.scale(dvMax / dv.length()));
             // if the smooth version would run into something, brake instead (straight towards stopping)
             if (!clearLine(pos, pos.add(limited), -0.01)) {
                 double ls = lastCmd.length(), dec = Math.min(dvMax, Tuning.d("decel.max", 0.2));
-                limited = ls > dec ? lastCmd.multiply((ls - dec) / ls) : Vec3d.ZERO;
+                limited = ls > dec ? lastCmd.scale((ls - dec) / ls) : Vec3.ZERO;
             }
             want = limited;
             dvLimited++;
@@ -2232,17 +2231,17 @@ public class BrainImpl implements Brain {
             double hNew = hLast - maxDrop;
             boolean reversing = want.x * lastCmd.x + want.z * lastCmd.z < 0;
             double ux = hNow > 1e-4 && !reversing ? want.x / hNow : lastCmd.x / hLast, uz = hNow > 1e-4 && !reversing ? want.z / hNow : lastCmd.z / hLast;
-            Vec3d cand = new Vec3d(ux * hNew, want.y, uz * hNew);
+            Vec3 cand = new Vec3(ux * hNew, want.y, uz * hNew);
             if (clearLine(pos, pos.add(cand), -0.01)) want = cand;
             else {
                 // keeping speed would hit something: try the old direction, else accept the hit (logged)
-                Vec3d old = new Vec3d(lastCmd.x / hLast * hNew, want.y, lastCmd.z / hLast * hNew);
+                Vec3 old = new Vec3(lastCmd.x / hLast * hNew, want.y, lastCmd.z / hLast * hNew);
                 if (clearLine(pos, pos.add(old), -0.01)) want = old;
                 else hardBrakes++;
             }
         }
-        if (Tuning.b("collide.resolve", true) && want.lengthSquared() > 1e-10) {
-            Vec3d adj = net.minecraft.entity.Entity.adjustMovementForCollisions(mc.player, want, mc.player.getBoundingBox(), mc.world, java.util.List.of());
+        if (Tuning.b("collide.resolve", true) && want.lengthSqr() > 1e-10) {
+            Vec3 adj = net.minecraft.world.entity.Entity.collideBoundingBox(mc.player, want, mc.player.getBoundingBox(), mc.level, java.util.List.of());
             if (Math.abs(adj.x - want.x) > 1e-6 || Math.abs(adj.z - want.z) > 1e-6) {
                 wallClips++;
                 double lost = Math.hypot(want.x, want.z) - Math.hypot(adj.x, adj.z);
@@ -2250,27 +2249,27 @@ public class BrainImpl implements Brain {
                 // stop a hair short so the game's own collision pass doesn't flag a hit either
                 // (a floor in the way of a descent: stop short of it, don't touch down - see NODE_Y)
                 double fy = adj.y > want.y + 1e-6 && want.y < 0 && phase != Phase.Landing ? adj.y + Tuning.d("floor.gap", 0.12) : adj.y;
-                want = new Vec3d(adj.x * 0.98, fy, adj.z * 0.98);
+                want = new Vec3(adj.x * 0.98, fy, adj.z * 0.98);
                 creepTicks = Math.max(creepTicks, 10); // we were about to hit something: line up on the path
             }
             else if (Math.abs(adj.y - want.y) > 1e-6) {
                 double fy = adj.y > want.y && want.y < 0 && phase != Phase.Landing ? adj.y + Tuning.d("floor.gap", 0.12) : adj.y;
-                want = new Vec3d(want.x, fy, want.z);
+                want = new Vec3(want.x, fy, want.z);
             }
         }
         // The line to the carrot was checked against lava - the move that the speed / turn limits and the collision pass
         // made of it was not (clipped a lava block in a wall). Last check: don't END a move in lava.
-        if (!lavaOkNow && !escaping && want.lengthSquared() > 1e-8 && !mc.player.isInLava() && lavaTouches(mc.player.getBoundingBox().offset(want))) {
-            Vec3d pick = Vec3d.ZERO;
-            for (Vec3d alt : new Vec3d[] {new Vec3d(want.x * 0.5, Math.max(want.y, 0), want.z * 0.5), new Vec3d(0, Math.max(want.y, 0), 0), new Vec3d(0, 0.15, 0)}) {
-                Vec3d adj2 = net.minecraft.entity.Entity.adjustMovementForCollisions(mc.player, alt, mc.player.getBoundingBox(), mc.world, java.util.List.of());
-                if (!lavaTouches(mc.player.getBoundingBox().offset(adj2))) {
+        if (!lavaOkNow && !escaping && want.lengthSqr() > 1e-8 && !mc.player.isInLava() && lavaTouches(mc.player.getBoundingBox().move(want))) {
+            Vec3 pick = Vec3.ZERO;
+            for (Vec3 alt : new Vec3[] {new Vec3(want.x * 0.5, Math.max(want.y, 0), want.z * 0.5), new Vec3(0, Math.max(want.y, 0), 0), new Vec3(0, 0.15, 0)}) {
+                Vec3 adj2 = net.minecraft.world.entity.Entity.collideBoundingBox(mc.player, alt, mc.player.getBoundingBox(), mc.level, java.util.List.of());
+                if (!lavaTouches(mc.player.getBoundingBox().move(adj2))) {
                     pick = adj2;
                     break;
                 }
             }
-            if (mc.player.age - lavaLogAge > 20) {
-                lavaLogAge = mc.player.age;
+            if (mc.player.tickCount - lavaLogAge > 20) {
+                lavaLogAge = mc.player.tickCount;
                 LOG.info("[VG] lava dodge at ({}): ({}) would have ended in lava -> ({})", v(pos), v(want), v(pick));
             }
             want = pick;
@@ -2283,15 +2282,15 @@ public class BrainImpl implements Brain {
         // with the last one - move only as far as the time that really passed
         if (Tuning.b("tps.sync", false)) {
             double tps = meteordevelopment.meteorclient.utils.world.TickRate.INSTANCE.getTickRate();
-            if (tps > 1 && tps < Tuning.d("tps.sync.below", 19.0)) want = want.multiply(Math.max(Tuning.d("tps.sync.min", 0.5), tps / 20.0));
+            if (tps > 1 && tps < Tuning.d("tps.sync.below", 19.0)) want = want.scale(Math.max(Tuning.d("tps.sync.min", 0.5), tps / 20.0));
         }
         if (tickDtMs < Tuning.d("tick.catchup.ms", 30) && Tuning.b("tick.catchup.scale", false)) {
-            want = want.multiply(Math.max(Tuning.d("tick.catchup.min", 0.0), tickDtMs / 50.0));
+            want = want.scale(Math.max(Tuning.d("tick.catchup.min", 0.0), tickDtMs / 50.0));
             catchups++;
         }
-        ((IVec3d) event.movement).meteor$set(want.x, want.y, want.z);
+        ((IVec3) event.movement).meteor$set(want.x, want.y, want.z);
         history.addLast(String.format("t%d pos(%.2f %.2f %.2f) want(%.2f %.4f %.2f) vf(%.2f %.4f %.2f) sH=%.2f sV=%.2f%s%s%s",
-            mc.player.age, pos.x, pos.y, pos.z, want.x, want.y, want.z, dbgVfMove.x, dbgVfMove.y, dbgVfMove.z, sH, sV,
+            mc.player.tickCount, pos.x, pos.y, pos.z, want.x, want.y, want.z, dbgVfMove.x, dbgVfMove.y, dbgVfMove.z, sH, sV,
             creepTicks > 0 ? " creep" : "", carrotTight ? " tight" : "", mineTarget != null ? " mine" : "")
             + (mc.player.horizontalCollision ? " HC" : "") + (mc.player.verticalCollision ? " VC" : "") + (setbackTicks > 0 ? " sb" : ""));
         while (history.size() > 40) history.pollFirst();
@@ -2310,51 +2309,51 @@ public class BrainImpl implements Brain {
     }
 
     /** How far the path keeps going roughly in direction dir after the carrot (up to 160 blocks). */
-    private double straightPast(Vec3d dir) {
-        if (carrotIdx < 0 || dir.lengthSquared() < 1e-6) return 0;
-        Vec3d u = dir.normalize();
+    private double straightPast(Vec3 dir) {
+        if (carrotIdx < 0 || dir.lengthSqr() < 1e-6) return 0;
+        Vec3 u = dir.normalize();
         double run = 0;
-        Vec3d from = path.get(Math.min(carrotIdx, path.size() - 1));
+        Vec3 from = path.get(Math.min(carrotIdx, path.size() - 1));
         // compare against the overall heading from the carrot (grid paths zig-zag a bit on diagonals)
         for (int i = carrotIdx + 1; i < path.size() && run < 160; i++) {
-            Vec3d d = path.get(i).subtract(from);
+            Vec3 d = path.get(i).subtract(from);
             double len = d.length();
             if (len < 1e-6) continue;
-            if (d.multiply(1 / len).dotProduct(u) < 0.94) break; // turns more than ~20 degrees
+            if (d.scale(1 / len).dot(u) < 0.94) break; // turns more than ~20 degrees
             run = len;
         }
         return run;
     }
 
     /** Follow the path node by node: onto the nearest node's centre, then to the next one, one axis at a time. */
-    private Vec3d creepAlong(Vec3d pos, double speed) {
-        if (path.isEmpty()) return Vec3d.ZERO;
+    private Vec3 creepAlong(Vec3 pos, double speed) {
+        if (path.isEmpty()) return Vec3.ZERO;
         pathIdx = nearestIndex(pos, Math.max(0, pathIdx - 16), Math.min(path.size(), pathIdx + 96));
-        Vec3d node = path.get(pathIdx);
+        Vec3 node = path.get(pathIdx);
         if (pathIdx + 1 >= path.size()) return creep(pos, node, speed);
         int ni = pathIdx + 1;
         while (ni + 1 < path.size() && path.get(ni).distanceTo(node) < 0.05) ni++; // the same node twice: skip
-        Vec3d next = path.get(ni);
+        Vec3 next = path.get(ni);
         // already on the way from this node to the next (short steps may not get past halfway in one go): keep going
         if (pos.distanceTo(node) <= 0.08 || segDist(pos, node, next) <= 0.08) return creep(pos, next, speed);
         if (pathIdx > 0 && segDist(pos, path.get(pathIdx - 1), node) <= 0.08) return creep(pos, node, speed);
         return creep(pos, node, speed);
     }
 
-    private static double segDist(Vec3d p, Vec3d a, Vec3d b) {
-        Vec3d ab = b.subtract(a);
-        double l2 = ab.lengthSquared();
+    private static double segDist(Vec3 p, Vec3 a, Vec3 b) {
+        Vec3 ab = b.subtract(a);
+        double l2 = ab.lengthSqr();
         if (l2 < 1e-9) return p.distanceTo(a);
-        double t = MathHelper.clamp(p.subtract(a).dotProduct(ab) / l2, 0, 1);
-        return p.distanceTo(a.add(ab.multiply(t)));
+        double t = Mth.clamp(p.subtract(a).dot(ab) / l2, 0, 1);
+        return p.distanceTo(a.add(ab.scale(t)));
     }
 
     /** A step towards target that doesn't touch anything: straight if clear, else along one axis (biggest first). */
-    private Vec3d creep(Vec3d pos, Vec3d target, double speed) {
-        Vec3d d = target.subtract(pos);
+    private Vec3 creep(Vec3 pos, Vec3 target, double speed) {
+        Vec3 d = target.subtract(pos);
         double len = d.length();
-        if (len < 1e-4) return Vec3d.ZERO;
-        Vec3d direct = len > speed ? d.multiply(speed / len) : d;
+        if (len < 1e-4) return Vec3.ZERO;
+        Vec3 direct = len > speed ? d.scale(speed / len) : d;
         if (clearLine(pos, pos.add(direct), -0.01)) return direct;
 
         double[] c = {d.x, d.y, d.z};
@@ -2362,27 +2361,27 @@ public class BrainImpl implements Brain {
         java.util.Arrays.sort(order, (a, b) -> Double.compare(Math.abs(c[b]), Math.abs(c[a])));
         for (double scale : new double[] {1, 0.25}) {
             for (int a : order) {
-                double st = MathHelper.clamp(c[a], -speed, speed) * scale;
+                double st = Mth.clamp(c[a], -speed, speed) * scale;
                 if (Math.abs(st) < 1e-4) continue;
-                Vec3d mv = a == 0 ? new Vec3d(st, 0, 0) : a == 1 ? new Vec3d(0, st, 0) : new Vec3d(0, 0, st);
+                Vec3 mv = a == 0 ? new Vec3(st, 0, 0) : a == 1 ? new Vec3(0, st, 0) : new Vec3(0, 0, st);
                 if (clearLine(pos, pos.add(mv), -0.01)) return mv;
             }
         }
-        Box here = new Box(pos.x - 0.3, pos.y, pos.z - 0.3, pos.x + 0.3, pos.y + 0.6, pos.z + 0.3);
-        Vec3d best = Vec3d.ZERO;
+        AABB here = new AABB(pos.x - 0.3, pos.y, pos.z - 0.3, pos.x + 0.3, pos.y + 0.6, pos.z + 0.3);
+        Vec3 best = Vec3.ZERO;
         double bestD = Double.MAX_VALUE;
-        for (Vec3d ax : AXES6) {
-            Vec3d mv = ax.multiply(0.25);
-            if (!clearBox(here.offset(mv).contract(0.01))) continue;
+        for (Vec3 ax : AXES6) {
+            Vec3 mv = ax.scale(0.25);
+            if (!clearBox(here.move(mv).deflate(0.01))) continue;
             double dd = pos.add(mv).distanceTo(target);
             if (dd >= len - 0.02) continue; // only steps that get closer
-            if (lastCmd.lengthSquared() > 1e-4 && mv.dotProduct(lastCmd) < -0.9 * mv.length() * lastCmd.length()) continue; // never straight back
+            if (lastCmd.lengthSqr() > 1e-4 && mv.dot(lastCmd) < -0.9 * mv.length() * lastCmd.length()) continue; // never straight back
             if (dd < bestD) {
                 bestD = dd;
                 best = mv;
             }
         }
-        if (best != Vec3d.ZERO) creepEscapes++;
+        if (best != Vec3.ZERO) creepEscapes++;
         return best;
     }
 
@@ -2391,7 +2390,7 @@ public class BrainImpl implements Brain {
         retryIn = 0;
         replanNow = true;
         m.warning(msg);
-        LOG.info("[VG] dig mode on at ({})", v(mc.player.getEntityPos()));
+        LOG.info("[VG] dig mode on at ({})", v(mc.player.position()));
     }
 
     /**
@@ -2399,14 +2398,14 @@ public class BrainImpl implements Brain {
      * points and a block map 7 wide x 7 deep, from 2 below the feet to 3 above. At most one every 2 s.
      */
     private void snapshot(String why) {
-        if (mc.player == null || mc.world == null || mc.player.age - snapAge < Tuning.i("snapshot.interval", 40)) return;
-        snapAge = mc.player.age;
-        Vec3d pos = mc.player.getEntityPos();
-        BlockPos f = BlockPos.ofFloored(pos.x, pos.y + 0.05, pos.z);
+        if (mc.player == null || mc.level == null || mc.player.tickCount - snapAge < Tuning.i("snapshot.interval", 40)) return;
+        snapAge = mc.player.tickCount;
+        Vec3 pos = mc.player.position();
+        BlockPos f = BlockPos.containing(pos.x, pos.y + 0.05, pos.z);
         StringBuilder sb = new StringBuilder();
         sb.append("\n[VG] snap ===== ").append(why).append(" =====");
         sb.append(String.format("\n[VG] snap pos(%.2f %.2f %.2f) feetBlock=%s vel(%s) gliding=%s onGround=%s hCollide=%s vCollide=%s phase=%s",
-            pos.x, pos.y, pos.z, f.toShortString(), v(mc.player.getVelocity()), mc.player.isGliding(), mc.player.isOnGround(),
+            pos.x, pos.y, pos.z, f.toShortString(), v(mc.player.getDeltaMovement()), mc.player.isFallFlying(), mc.player.onGround(),
             mc.player.horizontalCollision, mc.player.verticalCollision, phase));
         sb.append(String.format("\n[VG] snap speed=%.2f vSpeed=%.2f cap=%.2f capV=%.2f vfH=%.2f vfStart=%.2f vfV=%.2f creep=%d stall=%d tight=%s noCarrot=%d setbackTicks=%d dig=%d mine=%s digOut=%s mending=%s",
             curSpeed, curV, setbackCap, setbackCapV, vf.horizontalSpeed.get(), vf.startSpeed.get(), vf.verticalSpeed.get(),
@@ -2416,7 +2415,7 @@ public class BrainImpl implements Brain {
         StringBuilder next = new StringBuilder();
         java.util.HashSet<Long> pathCells = new java.util.HashSet<>();
         for (int i = Math.max(0, pathIdx - 2); i < Math.min(path.size(), pathIdx + 12); i++) {
-            BlockPos b = BlockPos.ofFloored(path.get(i));
+            BlockPos b = BlockPos.containing(path.get(i));
             pathCells.add(b.asLong());
             next.append(i == pathIdx ? " [" : " ").append(b.getX() - f.getX()).append(',').append(b.getY() - f.getY()).append(',').append(b.getZ() - f.getZ()).append(i == pathIdx ? "]" : "");
         }
@@ -2430,8 +2429,8 @@ public class BrainImpl implements Brain {
             for (int dz = -3; dz <= 3; dz++) {
                 sb.append("\n[VG] snap     ");
                 for (int dx = -3; dx <= 3; dx++) {
-                    BlockPos b = f.add(dx, dy, dz);
-                    sb.append(snapChar(b, dx == 0 && dz == 0 && (dy == 0 || dy == 1 && !mc.player.isGliding()), pathCells.contains(b.asLong())));
+                    BlockPos b = f.offset(dx, dy, dz);
+                    sb.append(snapChar(b, dx == 0 && dz == 0 && (dy == 0 || dy == 1 && !mc.player.isFallFlying()), pathCells.contains(b.asLong())));
                 }
             }
         }
@@ -2439,18 +2438,18 @@ public class BrainImpl implements Brain {
     }
 
     private char snapChar(BlockPos b, boolean you, boolean onPath) {
-        if (!mc.world.getChunkManager().isChunkLoaded(b.getX() >> 4, b.getZ() >> 4)) return '?';
+        if (!mc.level.getChunkSource().hasChunk(b.getX() >> 4, b.getZ() >> 4)) return '?';
         if (b.equals(mineTarget) || b.equals(digOutTarget)) return 'X';
-        BlockState st = mc.world.getBlockState(b);
-        if (st.getFluidState().isIn(FluidTags.LAVA)) return 'L';
+        BlockState st = mc.level.getBlockState(b);
+        if (st.getFluidState().is(FluidTags.LAVA)) return 'L';
         if (!st.getFluidState().isEmpty()) return '~';
-        if (st.isOf(Blocks.NETHER_PORTAL)) return 'P';
-        if (st.isOf(Blocks.FIRE) || st.isOf(Blocks.SOUL_FIRE)) return 'F';
-        if (st.isOf(Blocks.COBWEB)) return 'W';
-        net.minecraft.util.shape.VoxelShape shape = st.getCollisionShape(mc.world, b);
+        if (st.is(Blocks.NETHER_PORTAL)) return 'P';
+        if (st.is(Blocks.FIRE) || st.is(Blocks.SOUL_FIRE)) return 'F';
+        if (st.is(Blocks.COBWEB)) return 'W';
+        net.minecraft.world.phys.shapes.VoxelShape shape = st.getCollisionShape(mc.level, b);
         if (!shape.isEmpty()) {
             if (you) return '!'; // we're inside a block?!
-            Box bb = shape.getBoundingBox();
+            AABB bb = shape.bounds();
             boolean full = bb.minX <= 0 && bb.minY <= 0 && bb.minZ <= 0 && bb.maxX >= 1 && bb.maxY >= 1 && bb.maxZ >= 1;
             return full ? '#' : '_';
         }
@@ -2463,37 +2462,37 @@ public class BrainImpl implements Brain {
         AutoReconnect ar = Modules.get().get(AutoReconnect.class);
         if (ar != null && ar.isActive()) ar.toggle();
         LOG.info("[VG] logging out: {}", why);
-        mc.player.networkHandler.onDisconnect(new DisconnectS2CPacket(Text.literal("[Volytra Goto] " + why)));
+        mc.player.connection.handleDisconnect(new ClientboundDisconnectPacket(Component.literal("[Volytra Goto] " + why)));
     }
 
     /** Look through a few not-yet-checked chunks around us (4 per tick) for a Nether portal. */
-    private void scanForPortals(Vec3d pos, boolean divert) {
-        int pcx = MathHelper.floor(pos.x) >> 4, pcz = MathHelper.floor(pos.z) >> 4, r = Tuning.i("portal.scan.chunks", 6), budget = Tuning.i("portal.scan.budget", 6);
+    private void scanForPortals(Vec3 pos, boolean divert) {
+        int pcx = Mth.floor(pos.x) >> 4, pcz = Mth.floor(pos.z) >> 4, r = Tuning.i("portal.scan.chunks", 6), budget = Tuning.i("portal.scan.budget", 6);
         for (int dx = -r; dx <= r && budget > 0; dx++) {
             for (int dz = -r; dz <= r && budget > 0; dz++) {
                 int cx = pcx + dx, cz = pcz + dz;
                 long key = ((long) cx << 32) ^ (cz & 0xffffffffL);
-                if (scannedChunks.contains(key) || !mc.world.getChunkManager().isChunkLoaded(cx, cz)) continue;
+                if (scannedChunks.contains(key) || !mc.level.getChunkSource().hasChunk(cx, cz)) continue;
                 scannedChunks.add(key);
                 budget--;
-                BlockPos portal = findPortal(mc.world.getChunk(cx, cz));
+                BlockPos portal = findPortal(mc.level.getChunk(cx, cz));
                 if (portal != null) considerPortal(portal, divert);
                 if (divertedToPortal) return;
             }
         }
     }
 
-    private BlockPos findPortal(WorldChunk chunk) {
-        ChunkSection[] sections = chunk.getSectionArray();
+    private BlockPos findPortal(LevelChunk chunk) {
+        LevelChunkSection[] sections = chunk.getSections();
         for (int i = 0; i < sections.length; i++) {
-            ChunkSection sec = sections[i];
-            if (sec == null || sec.isEmpty() || !sec.getBlockStateContainer().hasAny(st -> st.isOf(Blocks.NETHER_PORTAL))) continue;
-            int baseY = mc.world.sectionIndexToCoord(i) << 4;
+            LevelChunkSection sec = sections[i];
+            if (sec == null || sec.hasOnlyAir() || !sec.getStates().maybeHas(st -> st.is(Blocks.NETHER_PORTAL))) continue;
+            int baseY = mc.level.getSectionYFromSectionIndex(i) << 4;
             for (int y = 0; y < 16; y++) {
                 for (int x = 0; x < 16; x++) {
                     for (int z = 0; z < 16; z++) {
-                        if (sec.getBlockState(x, y, z).isOf(Blocks.NETHER_PORTAL)) {
-                            return new BlockPos(chunk.getPos().getStartX() + x, baseY + y, chunk.getPos().getStartZ() + z);
+                        if (sec.getBlockState(x, y, z).is(Blocks.NETHER_PORTAL)) {
+                            return new BlockPos(chunk.getPos().getMinBlockX() + x, baseY + y, chunk.getPos().getMinBlockZ() + z);
                         }
                     }
                 }
@@ -2504,10 +2503,10 @@ public class BrainImpl implements Brain {
 
     private void considerPortal(BlockPos portal, boolean divert) {
         // bottom of the portal
-        BlockPos.Mutable b = portal.mutableCopy();
-        while (mc.world.getBlockState(b.down()).isOf(Blocks.NETHER_PORTAL)) b.move(0, -1, 0);
-        BlockPos bottom = b.toImmutable();
-        for (BlockPos ig : ignoredPortals) if (ig.isWithinDistance(bottom, 12)) return;
+        BlockPos.MutableBlockPos b = portal.mutable();
+        while (mc.level.getBlockState(b.below()).is(Blocks.NETHER_PORTAL)) b.move(0, -1, 0);
+        BlockPos bottom = b.immutable();
+        for (BlockPos ig : ignoredPortals) if (ig.closerThan(bottom, 12)) return;
         if (flightStart != null && Math.hypot(bottom.getX() + 0.5 - flightStart.x, bottom.getZ() + 0.5 - flightStart.z) < portalIgnoreRadius.get()) {
             ignoredPortals.add(bottom);
             LOG.info("[VG] portal at {} - within {} blocks of where the flight started, ignored", bottom.toShortString(), portalIgnoreRadius.get());
@@ -2515,7 +2514,7 @@ public class BrainImpl implements Brain {
         }
         if (!divert) {
             ignoredPortals.add(bottom);
-            LOG.info("[VG] portal seen at {} ({} blocks away) - not stopping: portal-stop is off", bottom.toShortString(), String.format("%.0f", Math.sqrt(bottom.getSquaredDistance(mc.player.getBlockPos()))));
+            LOG.info("[VG] portal seen at {} ({} blocks away) - not stopping: portal-stop is off", bottom.toShortString(), String.format("%.0f", Math.sqrt(bottom.distSqr(mc.player.blockPosition()))));
             m.info("Passed a Nether portal at %d %d %d (portal-stop is off).", bottom.getX(), bottom.getY(), bottom.getZ());
             return;
         }
@@ -2553,32 +2552,32 @@ public class BrainImpl implements Brain {
     }
 
     /** Blocks between our feet and the first solid block below (up to max); -1 if nothing / lava first. */
-    private int groundBelow(Vec3d pos, int max) {
-        int fy = MathHelper.floor(pos.y);
-        BlockPos.Mutable b = new BlockPos.Mutable();
+    private int groundBelow(Vec3 pos, int max) {
+        int fy = Mth.floor(pos.y);
+        BlockPos.MutableBlockPos b = new BlockPos.MutableBlockPos();
         for (int i = 1; i <= max; i++) {
-            b.set(MathHelper.floor(pos.x), fy - i, MathHelper.floor(pos.z));
-            BlockState st = mc.world.getBlockState(b);
-            if (st.getFluidState().isIn(FluidTags.LAVA) || st.isOf(Blocks.FIRE) || st.isOf(Blocks.SOUL_FIRE)) return -1; // orbs burn
-            if (!st.getFluidState().isEmpty() || !st.getCollisionShape(mc.world, b).isEmpty()) return i - 1;
+            b.set(Mth.floor(pos.x), fy - i, Mth.floor(pos.z));
+            BlockState st = mc.level.getBlockState(b);
+            if (st.getFluidState().is(FluidTags.LAVA) || st.is(Blocks.FIRE) || st.is(Blocks.SOUL_FIRE)) return -1; // orbs burn
+            if (!st.getFluidState().isEmpty() || !st.getCollisionShape(mc.level, b).isEmpty()) return i - 1;
         }
         return -1;
     }
 
     /** Hover a few blocks over the ground and throw XP bottles straight down until the elytra is mended. */
-    private void updateMend(Vec3d pos, boolean gliding) {
-        if (mc.player.isUsingItem() || mc.options.useKey.isPressed()) return; // eating first (see mineTick)
-        ItemStack chest = mc.player.getEquippedStack(EquipmentSlot.CHEST);
+    private void updateMend(Vec3 pos, boolean gliding) {
+        if (mc.player.isUsingItem() || mc.options.keyUse.isDown()) return; // eating first (see mineTick)
+        ItemStack chest = mc.player.getItemBySlot(EquipmentSlot.CHEST);
         FindItemResult xp = InvUtils.find(Items.EXPERIENCE_BOTTLE);
-        boolean repaired = chest.isOf(Items.ELYTRA) && chest.isDamageable() && durability(chest) >= chest.getMaxDamage() * 0.95;
+        boolean repaired = chest.is(Items.ELYTRA) && chest.isDamageableItem() && durability(chest) >= chest.getMaxDamage() * 0.95;
         // still wearing down (the XP going to other Mending gear): give up at min-durability so a spare goes on
-        boolean worn = chest.isOf(Items.ELYTRA) && chest.isDamageable() && durability(chest) <= minDurability.get();
-        if (repaired || worn || !chest.isOf(Items.ELYTRA) || !xp.found() || !gliding || ++mendTicks > 1200) {
+        boolean worn = chest.is(Items.ELYTRA) && chest.isDamageableItem() && durability(chest) <= minDurability.get();
+        if (repaired || worn || !chest.is(Items.ELYTRA) || !xp.found() || !gliding || ++mendTicks > 1200) {
             mending = false;
             mendCooldown = repaired ? 100 : 600;
             InvUtils.swapBack();
             replanNow = true;
-            if (chest.isOf(Items.ELYTRA) && chest.isDamageable()) {
+            if (chest.is(Items.ELYTRA) && chest.isDamageableItem()) {
                 if (repaired) m.info("Elytra mended (%d durability).", durability(chest));
                 else m.warning("Stopped mending at %d durability (%s).", durability(chest), !xp.found() ? "out of XP bottles" : mendTicks > 1200 ? "took too long" : "not flying");
             }
@@ -2607,7 +2606,7 @@ public class BrainImpl implements Brain {
         }
         InvUtils.swap(xp.slot(), true);
         throwCooldown = 2;
-        Rotations.rotate(mc.player.getYaw(), 90, 60, () -> mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND));
+        Rotations.rotate(mc.player.getYRot(), 90, 60, () -> mc.gameMode.useItem(mc.player, InteractionHand.MAIN_HAND));
     }
 
     /**
@@ -2617,30 +2616,30 @@ public class BrainImpl implements Brain {
      */
     private boolean walkTunnel() {
         if (path.size() < 2) return false;
-        Vec3d pos = mc.player.getEntityPos();
+        Vec3 pos = mc.player.position();
         pathIdx = nearestIndex(pos, Math.max(0, pathIdx - 4), Math.min(path.size(), pathIdx + 8));
         if (pathIdx >= path.size() - 1) {
-            if (tunneling) tunnelEndAge = mc.player.age;
+            if (tunneling) tunnelEndAge = mc.player.tickCount;
             tunneling = false;
             replanNow = true;
             return false;
         }
-        Vec3d next = path.get(pathIdx + 1);
+        Vec3 next = path.get(pathIdx + 1);
         if (next.y > path.get(pathIdx).y + 0.5) return false; // going up: not on foot
         if (next.y < path.get(pathIdx).y - 0.5 && Math.hypot(next.x - path.get(pathIdx).x, next.z - path.get(pathIdx).z) < 0.5) {
             // straight down: stand in the middle of the block, dig the one under our feet, drop, repeat
-            Vec3d node = path.get(pathIdx);
+            Vec3 node = path.get(pathIdx);
             double cdx = node.x - pos.x, cdz = node.z - pos.z, cl = Math.hypot(cdx, cdz);
             if (cl > 0.12) {
                 double sp = Math.min(0.15, cl);
-                groundNudge = new Vec3d(cdx / cl * sp, 0, cdz / cl * sp);
+                groundNudge = new Vec3(cdx / cl * sp, 0, cdz / cl * sp);
                 return true;
             }
-            BlockPos below = BlockPos.ofFloored(pos.x, pos.y - 0.5, pos.z);
-            BlockState bs = mc.world.getBlockState(below);
-            if (!FlightPathfinder.blocks(mc.world, below, bs)) return true; // already open: we're about to drop
-            if (pendingBreak.containsKey(below.asLong()) && mc.player.age - pendingBreak.get(below.asLong()) < Tuning.i("dig.pending.ticks", 16)) return true;
-            if (noMine.contains(below.asLong()) || !FlightPathfinder.minable(mc.world, below, bs)) {
+            BlockPos below = BlockPos.containing(pos.x, pos.y - 0.5, pos.z);
+            BlockState bs = mc.level.getBlockState(below);
+            if (!FlightPathfinder.blocks(mc.level, below, bs)) return true; // already open: we're about to drop
+            if (pendingBreak.containsKey(below.asLong()) && mc.player.tickCount - pendingBreak.get(below.asLong()) < Tuning.i("dig.pending.ticks", 16)) return true;
+            if (noMine.contains(below.asLong()) || !FlightPathfinder.minable(mc.level, below, bs)) {
                 LOG.info("[VG] digging down: {} isn't safe - turning", below.toShortString());
                 noMine.add(below.asLong());
                 if (tunneling && startTunnel()) return true;
@@ -2652,10 +2651,10 @@ public class BrainImpl implements Brain {
             return true;
         }
         if (Math.hypot(next.x - pos.x, next.z - pos.z) < 0.15 && pathIdx + 2 < path.size()) next = path.get(pathIdx + 2);
-        BlockPos here = BlockPos.ofFloored(pos.x, pos.y + 0.2, pos.z);
-        BlockPos step = BlockPos.ofFloored(next.x, pos.y + 0.2, next.z);
+        BlockPos here = BlockPos.containing(pos.x, pos.y + 0.2, pos.z);
+        BlockPos step = BlockPos.containing(next.x, pos.y + 0.2, next.z);
         int confirm = Tuning.i("dig.confirm.ticks", 8);
-        boolean crawling = mc.player.getBoundingBox().getLengthY() < 1.0; // in a 1-high gap the game makes us crawl
+        boolean crawling = mc.player.getBoundingBox().getYsize() < 1.0; // in a 1-high gap the game makes us crawl
         boolean waiting = false;
         // Crawling through a 1-high tunnel tops out at 2 blocks a second; walking a 2-high one does 4, and now that rock
         // breaks in one hit the second block per step costs one tick. So: stand up (open the block above us) and walk -
@@ -2663,24 +2662,24 @@ public class BrainImpl implements Brain {
         boolean standUp = false;
         if (crawling && !instantOff && Tuning.b("tunnel.stand", false)) { // off: tunnels are 1x1, crawled
             standUp = true;
-            for (BlockPos c : new BlockPos[] {here.up(), step.up()}) {
-                BlockState cs = mc.world.getBlockState(c);
-                if (FlightPathfinder.blocks(mc.world, c, cs) && (noMine.contains(c.asLong()) || !FlightPathfinder.minable(mc.world, c, cs))) standUp = false;
+            for (BlockPos c : new BlockPos[] {here.above(), step.above()}) {
+                BlockState cs = mc.level.getBlockState(c);
+                if (FlightPathfinder.blocks(mc.level, c, cs) && (noMine.contains(c.asLong()) || !FlightPathfinder.minable(mc.level, c, cs))) standUp = false;
             }
         }
         boolean low = crawling && !standUp;
-        for (BlockPos c : low ? new BlockPos[] {step} : new BlockPos[] {here.up(), step.up(), step}) {
-            BlockState st = mc.world.getBlockState(c);
-            if (!FlightPathfinder.blocks(mc.world, c, st)) {
-                if (brokeAge.containsKey(c.asLong()) && mc.player.age - brokeAge.get(c.asLong()) < confirm) return true; // just broken: wait
+        for (BlockPos c : low ? new BlockPos[] {step} : new BlockPos[] {here.above(), step.above(), step}) {
+            BlockState st = mc.level.getBlockState(c);
+            if (!FlightPathfinder.blocks(mc.level, c, st)) {
+                if (brokeAge.containsKey(c.asLong()) && mc.player.tickCount - brokeAge.get(c.asLong()) < confirm) return true; // just broken: wait
                 continue;
             }
             brokeAge.remove(c.asLong());
-            if (pendingBreak.containsKey(c.asLong()) && mc.player.age - pendingBreak.get(c.asLong()) < Tuning.i("dig.pending.ticks", 16)) {
+            if (pendingBreak.containsKey(c.asLong()) && mc.player.tickCount - pendingBreak.get(c.asLong()) < Tuning.i("dig.pending.ticks", 16)) {
                 waiting = true; // break sent: the server will remove it shortly
                 continue;
             }
-            if (noMine.contains(c.asLong()) || !FlightPathfinder.minable(mc.world, c, st)) {
+            if (noMine.contains(c.asLong()) || !FlightPathfinder.minable(mc.level, c, st)) {
                 LOG.info("[VG] tunnel on foot: {} isn't safe to dig - turning", c.toShortString());
                 noMine.add(c.asLong());
                 if (tunneling && startTunnel()) return true;
@@ -2696,18 +2695,18 @@ public class BrainImpl implements Brain {
         // for the server, walk, repeat: 1.3 blocks a second through rock).
         int aheadSteps = Tuning.i("dig.ahead.steps", 5);
         if (aheadSteps > 1 && !mc.player.isUsingItem()) {
-            Vec3d eye = mc.player.getEyePos();
+            Vec3 eye = mc.player.getEyePosition();
             ahead:
             for (int k = 2; k <= aheadSteps; k++) {
                 if (pathIdx + k >= path.size()) break;
-                Vec3d nk = path.get(pathIdx + k);
+                Vec3 nk = path.get(pathIdx + k);
                 if (Math.abs(nk.y - path.get(pathIdx).y) > 0.5) break; // the tunnel turns up or down there
-                BlockPos sk = BlockPos.ofFloored(nk.x, pos.y + 0.2, nk.z);
-                for (BlockPos c : low ? new BlockPos[] {sk} : new BlockPos[] {sk.up(), sk}) {
-                    BlockState st = mc.world.getBlockState(c);
-                    if (!FlightPathfinder.blocks(mc.world, c, st)) continue;
-                    if (pendingBreak.containsKey(c.asLong()) && mc.player.age - pendingBreak.get(c.asLong()) < Tuning.i("dig.pending.ticks", 16)) continue;
-                    if (eye.squaredDistanceTo(Vec3d.ofCenter(c)) > 20.25 || noMine.contains(c.asLong()) || !FlightPathfinder.minable(mc.world, c, st)) break ahead;
+                BlockPos sk = BlockPos.containing(nk.x, pos.y + 0.2, nk.z);
+                for (BlockPos c : low ? new BlockPos[] {sk} : new BlockPos[] {sk.above(), sk}) {
+                    BlockState st = mc.level.getBlockState(c);
+                    if (!FlightPathfinder.blocks(mc.level, c, st)) continue;
+                    if (pendingBreak.containsKey(c.asLong()) && mc.player.tickCount - pendingBreak.get(c.asLong()) < Tuning.i("dig.pending.ticks", 16)) continue;
+                    if (eye.distanceToSqr(Vec3.atCenterOf(c)) > 20.25 || noMine.contains(c.asLong()) || !FlightPathfinder.minable(mc.level, c, st)) break ahead;
                     dig(c);
                     break ahead;
                 }
@@ -2718,10 +2717,10 @@ public class BrainImpl implements Brain {
         if (l > 0.05) {
             // crawling goes at the Speed module's pace too (with Speed on, a crawl is as fast as a run)
             double sp = Math.min(crawling && !Tuning.b("walk.use.speed", true) ? Tuning.d("tunnel.crawl.speed", 0.1) : walkSpeed(), l);
-            groundNudge = new Vec3d(dx / l * sp, 0, dz / l * sp);
-            mc.player.setYaw((float) Math.toDegrees(Math.atan2(-dx, dz)));
+            groundNudge = new Vec3(dx / l * sp, 0, dz / l * sp);
+            mc.player.setYRot((float) Math.toDegrees(Math.atan2(-dx, dz)));
         }
-        if (mc.player.age % 40 == 0) LOG.info("[VG] tunnel on foot: at node {}/{} pos=({})", pathIdx, path.size(), v(pos));
+        if (mc.player.tickCount % 40 == 0) LOG.info("[VG] tunnel on foot: at node {}/{} pos=({})", pathIdx, path.size(), v(pos));
         return true;
     }
 
@@ -2738,37 +2737,37 @@ public class BrainImpl implements Brain {
         java.util.Arrays.sort(order, (a, b) -> Double.compare(dirs[b][0] * tdx + dirs[b][2] * tdz - Math.abs(dirs[b][1]) * 1e6,
             dirs[a][0] * tdx + dirs[a][2] * tdz - Math.abs(dirs[a][1]) * 1e6));
         int maxLen = Tuning.i("tunnel.max", 40);
-        List<Vec3d> best = null;
+        List<Vec3> best = null;
         int bestDir = -1;
         for (int oi : order) {
             int[] d = dirs[oi];
-            ArrayList<Vec3d> pts = new ArrayList<>();
-            pts.add(new Vec3d(start.getX() + 0.5, start.getY() + NODE_Y, start.getZ() + 0.5));
+            ArrayList<Vec3> pts = new ArrayList<>();
+            pts.add(new Vec3(start.getX() + 0.5, start.getY() + NODE_Y, start.getZ() + 0.5));
             int rock = 0, airRun = 0;
             boolean ok = false;
             for (int i = 1; i <= maxLen; i++) {
-                BlockPos c = start.add(d[0] * i, d[1] * i, d[2] * i);
-                if (c.getY() <= mc.world.getBottomY() + 2 || c.getY() >= mc.world.getTopYInclusive() - 2) break;
-                if (!mc.world.getChunkManager().isChunkLoaded(c.getX() >> 4, c.getZ() >> 4)) {
+                BlockPos c = start.offset(d[0] * i, d[1] * i, d[2] * i);
+                if (c.getY() <= mc.level.getMinY() + 2 || c.getY() >= mc.level.getMaxY() - 2) break;
+                if (!mc.level.getChunkSource().hasChunk(c.getX() >> 4, c.getZ() >> 4)) {
                     ok = rock > 0;
                     break;
                 }
-                BlockState st = mc.world.getBlockState(c);
+                BlockState st = mc.level.getBlockState(c);
                 if (!st.getFluidState().isEmpty()) break; // lava / water in the way: not this direction
                 if (d[1] == 0) {
-                    BlockPos head = c.up();
-                    BlockState hs = mc.world.getBlockState(head);
+                    BlockPos head = c.above();
+                    BlockState hs = mc.level.getBlockState(head);
                     if (!hs.getFluidState().isEmpty()) break;
-                    if (FlightPathfinder.blocks(mc.world, head, hs) && (noMine.contains(head.asLong()) || !FlightPathfinder.minable(mc.world, head, hs))) break;
+                    if (FlightPathfinder.blocks(mc.level, head, hs) && (noMine.contains(head.asLong()) || !FlightPathfinder.minable(mc.level, head, hs))) break;
                 }
-                if (FlightPathfinder.blocks(mc.world, c, st)) {
-                    if (noMine.contains(c.asLong()) || !FlightPathfinder.minable(mc.world, c, st)) break;
+                if (FlightPathfinder.blocks(mc.level, c, st)) {
+                    if (noMine.contains(c.asLong()) || !FlightPathfinder.minable(mc.level, c, st)) break;
                     rock++;
                     airRun = 0;
                 }
-                else if (FlightPathfinder.lavaAbove(mc.world, c.getX(), c.getY(), c.getZ(), 24)) break;
+                else if (FlightPathfinder.lavaAbove(mc.level, c.getX(), c.getY(), c.getZ(), 24)) break;
                 else airRun++;
-                pts.add(new Vec3d(c.getX() + 0.5, c.getY() + NODE_Y, c.getZ() + 0.5));
+                pts.add(new Vec3(c.getX() + 0.5, c.getY() + NODE_Y, c.getZ() + 0.5));
                 if (rock > 0 && airRun >= 3) {
                     ok = true; // through the rock and out the other side
                     break;
@@ -2782,11 +2781,11 @@ public class BrainImpl implements Brain {
             }
         }
         if (best == null) {
-            LOG.info("[VG] trapped at ({}) but no direction is safe to tunnel", v(mc.player.getEntityPos()));
+            LOG.info("[VG] trapped at ({}) but no direction is safe to tunnel", v(mc.player.position()));
             return false;
         }
         path = best;
-        for (Vec3d node : best) plannedMine.add(BlockPos.ofFloored(node).asLong());
+        for (Vec3 node : best) plannedMine.add(BlockPos.containing(node).asLong());
         pathIdx = 0;
         pathReachesGoal = false;
         pathEndsAtFrontier = false;
@@ -2814,55 +2813,55 @@ public class BrainImpl implements Brain {
     private void mineTick(BlockPos t) {
         // eating (Auto Gap / Auto Eat) comes first: switching to the pickaxe every tick cancels it - which is how the bot
         // burned from 18.8 to 7.7 hp in a lava pocket without the golden apple ever being eaten
-        if (mc.player.isUsingItem() || mc.options.useKey.isPressed()) return;
-        BlockState st = mc.world.getBlockState(t);
+        if (mc.player.isUsingItem() || mc.options.keyUse.isDown()) return;
+        BlockState st = mc.level.getBlockState(t);
         FindItemResult tool = InvUtils.findFastestTool(st);
         if (tool.found() && tool.isHotbar()) InvUtils.swap(tool.slot(), false);
-        float delta = st.calcBlockBreakingDelta(mc.player, mc.world, t);
+        float delta = st.getDestroyProgress(mc.player, mc.level, t);
         // standing on the ground: make sure the server knows it before we dig (see onSend)
-        if (mc.player.isOnGround() && Tuning.b("dig.ground.truth", true)) groundTruthForDigging();
-        boolean truth = mc.player.isOnGround() && !groundSpoofed() && Tuning.b("dig.ground.truth", true);
+        if (mc.player.onGround() && Tuning.b("dig.ground.truth", true)) groundTruthForDigging();
+        boolean truth = mc.player.onGround() && !groundSpoofed() && Tuning.b("dig.ground.truth", true);
         if (delta < Tuning.d("dig.packet.above", 0.5)) {
             pmTarget = null;
             lookDo(t, () -> BlockUtils.breakBlock(t, true));
             return;
         }
         // breaks in one hit (netherrack with a good pickaxe) and the server knows we're standing: one packet, like vanilla
-        if (instantOff && mc.player.age - instantOffAge > 1200) instantOff = false;
+        if (instantOff && mc.player.tickCount - instantOffAge > 1200) instantOff = false;
         boolean instant = truth && delta >= 1.0f && !instantOff && Tuning.b("dig.instant", true);
         int need = instant ? 0 : Math.max(Tuning.i("dig.min.ticks", 4), (int) Math.ceil(1.0 / Math.max(delta, 0.01)) + 1);
         int retry = instant ? Tuning.i("dig.instant.retry", 8) : need + 20;
-        BlockPos target = t.toImmutable();
-        if (!target.equals(pmTarget) || mc.player.age - pmStart > retry) {
+        BlockPos target = t.immutable();
+        if (!target.equals(pmTarget) || mc.player.tickCount - pmStart > retry) {
             // (retries of the SAME block in a row, and only for a minute: four scattered retries over a whole flight -
             // most of them during a pull-back storm, when the server takes nothing - switched one-hit breaks off for good)
             if (instant && !target.equals(pmTarget)) instantFails = 0;
             if (instant && target.equals(pmTarget) && ++instantFails >= Tuning.i("dig.instant.fails", 4)) {
                 instantOff = true;
-                instantOffAge = mc.player.age;
+                instantOffAge = mc.player.tickCount;
                 instantFails = 0;
                 LOG.info("[VG] the server isn't taking one-hit breaks ({} sent) - timed breaks for a minute", instantBreaks);
             }
             if (instant) {
                 instantBreaks++;
-                pendingBreak.put(target.asLong(), mc.player.age);
+                pendingBreak.put(target.asLong(), mc.player.tickCount);
                 if (instantBreaks == 1 || instantBreaks % 200 == 0) LOG.info("[VG] one-hit breaks: {} sent, {} retried", instantBreaks, instantFails);
             }
             pmTarget = target;
-            pmStart = mc.player.age;
+            pmStart = mc.player.tickCount;
             lookDo(target, () -> {
-                mc.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket(
-                    net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, target, net.minecraft.util.math.Direction.UP));
-                mc.player.swingHand(Hand.MAIN_HAND);
+                mc.getConnection().send(new net.minecraft.network.protocol.game.ServerboundPlayerActionPacket(
+                    net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action.START_DESTROY_BLOCK, target, net.minecraft.core.Direction.UP));
+                mc.player.swing(InteractionHand.MAIN_HAND);
             });
         }
-        else if (!instant && mc.player.age - pmStart == need) {
+        else if (!instant && mc.player.tickCount - pmStart == need) {
             lookDo(target, () -> {
-                mc.getNetworkHandler().sendPacket(new net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket(
-                    net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, target, net.minecraft.util.math.Direction.UP));
-                mc.player.swingHand(Hand.MAIN_HAND);
+                mc.getConnection().send(new net.minecraft.network.protocol.game.ServerboundPlayerActionPacket(
+                    net.minecraft.network.protocol.game.ServerboundPlayerActionPacket.Action.STOP_DESTROY_BLOCK, target, net.minecraft.core.Direction.UP));
+                mc.player.swing(InteractionHand.MAIN_HAND);
             });
-            pendingBreak.put(target.asLong(), mc.player.age);
+            pendingBreak.put(target.asLong(), mc.player.tickCount);
         }
     }
 
@@ -2871,24 +2870,24 @@ public class BrainImpl implements Brain {
      * at a wall next to us flies it into that wall (fly-into-wall damage while hovering to dig).
      */
     private void lookDo(BlockPos t, Runnable r) {
-        if (mc.player.isGliding() && !Tuning.b("dig.rotate.gliding", false)) r.run();
+        if (mc.player.isFallFlying() && !Tuning.b("dig.rotate.gliding", false)) r.run();
         else Rotations.rotate(Rotations.getYaw(t), Rotations.getPitch(t), 50, r);
     }
 
     /** The nearest diggable block in the way between us and a spot (our body swept along the straight line to it). */
-    private BlockPos blockerTowards(Vec3d to) {
-        Vec3d pos = mc.player.getEntityPos();
-        Box box = mc.player.getBoundingBox().stretch(to.subtract(pos)).expand(0.05);
+    private BlockPos blockerTowards(Vec3 to) {
+        Vec3 pos = mc.player.position();
+        AABB box = mc.player.getBoundingBox().expandTowards(to.subtract(pos)).inflate(0.05);
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
-        for (BlockPos b : BlockPos.iterate(MathHelper.floor(box.minX), MathHelper.floor(box.minY), MathHelper.floor(box.minZ),
-            MathHelper.floor(box.maxX), MathHelper.floor(box.maxY), MathHelper.floor(box.maxZ))) {
-            BlockState st = mc.world.getBlockState(b);
-            if (!FlightPathfinder.blocks(mc.world, b, st) || !stuckDiggable(b) || noMine.contains(b.asLong())) continue;
-            double d = Vec3d.ofCenter(b).squaredDistanceTo(pos);
+        for (BlockPos b : BlockPos.betweenClosed(Mth.floor(box.minX), Mth.floor(box.minY), Mth.floor(box.minZ),
+            Mth.floor(box.maxX), Mth.floor(box.maxY), Mth.floor(box.maxZ))) {
+            BlockState st = mc.level.getBlockState(b);
+            if (!FlightPathfinder.blocks(mc.level, b, st) || !stuckDiggable(b) || noMine.contains(b.asLong())) continue;
+            double d = Vec3.atCenterOf(b).distanceToSqr(pos);
             if (d < bestD) {
                 bestD = d;
-                best = b.toImmutable();
+                best = b.immutable();
             }
         }
         return best;
@@ -2896,11 +2895,11 @@ public class BrainImpl implements Brain {
 
     /** Mine pos for one tick (best hotbar tool, look at it). False once it's taken 20 s (then it's left alone). */
     private boolean dig(BlockPos target) {
-        if (mc.player.age - lastBrokeAge < Tuning.i("dig.gap.ticks", 1)) return true;
+        if (mc.player.tickCount - lastBrokeAge < Tuning.i("dig.gap.ticks", 1)) return true;
         if (!target.equals(digging)) {
-            digging = target.toImmutable();
+            digging = target.immutable();
             digTicks = 0;
-            LOG.info("[VG] digging out {} ({}) at ({})", digging, mc.world.getBlockState(digging).getBlock(), v(mc.player.getEntityPos()));
+            LOG.info("[VG] digging out {} ({}) at ({})", digging, mc.level.getBlockState(digging).getBlock(), v(mc.player.position()));
         }
         if (++digTicks > 400) {
             m.warning("Couldn't break %d %d %d in 20 seconds - leaving it.", target.getX(), target.getY(), target.getZ());
@@ -2916,15 +2915,15 @@ public class BrainImpl implements Brain {
      * Last resort: flying, should be moving, but hasn't got more than a block anywhere in 3 s - dig out whatever's
      * around us that's in the way, the block nearest to where we want to go first.
      */
-    private void updateDigOut(Vec3d pos, boolean gliding) {
+    private void updateDigOut(Vec3 pos, boolean gliding) {
         if (digOutTarget != null && (mineTarget != null || mending || phase != Phase.Flying)) {
             digOutTarget = null; // the path digger has a block of its own: two targets at once cancel each other's progress
             stillTicks = 0;
             return;
         }
         if (digOutTarget != null) {
-            BlockState st = mc.world.getBlockState(digOutTarget);
-            if (!FlightPathfinder.blocks(mc.world, digOutTarget, st)) { // broken: try moving again
+            BlockState st = mc.level.getBlockState(digOutTarget);
+            if (!FlightPathfinder.blocks(mc.level, digOutTarget, st)) { // broken: try moving again
                 digOutTarget = null;
                 stillTicks = 20;
                 replanNow = true;
@@ -2957,21 +2956,21 @@ public class BrainImpl implements Brain {
         if (stillTicks < Tuning.i("still.dig.ticks", 60) || !mineThrough.get()) return;
         stillTicks = 0;
 
-        Vec3d toward = path.get(Math.min(path.size() - 1, pathIdx + 1));
+        Vec3 toward = path.get(Math.min(path.size() - 1, pathIdx + 1));
         if (toward.distanceTo(pos) < 0.3) toward = path.get(Math.min(path.size() - 1, pathIdx + 2));
-        Vec3d dir = toward.subtract(pos);
-        if (dir.lengthSquared() > 1e-6) dir = dir.normalize().multiply(0.6);
-        Box box = mc.player.getBoundingBox().expand(0.2).stretch(dir);
+        Vec3 dir = toward.subtract(pos);
+        if (dir.lengthSqr() > 1e-6) dir = dir.normalize().scale(0.6);
+        AABB box = mc.player.getBoundingBox().inflate(0.2).expandTowards(dir);
         BlockPos best = null;
         double bestD = Double.MAX_VALUE;
-        for (BlockPos b : BlockPos.iterate(MathHelper.floor(box.minX), MathHelper.floor(box.minY), MathHelper.floor(box.minZ),
-            MathHelper.floor(box.maxX), MathHelper.floor(box.maxY), MathHelper.floor(box.maxZ))) {
-            BlockState st = mc.world.getBlockState(b);
-            if (!FlightPathfinder.blocks(mc.world, b, st) || !stuckDiggable(b)) continue;
-            double d = Vec3d.ofCenter(b).squaredDistanceTo(toward);
+        for (BlockPos b : BlockPos.betweenClosed(Mth.floor(box.minX), Mth.floor(box.minY), Mth.floor(box.minZ),
+            Mth.floor(box.maxX), Mth.floor(box.maxY), Mth.floor(box.maxZ))) {
+            BlockState st = mc.level.getBlockState(b);
+            if (!FlightPathfinder.blocks(mc.level, b, st) || !stuckDiggable(b)) continue;
+            double d = Vec3.atCenterOf(b).distanceToSqr(toward);
             if (d < bestD) {
                 bestD = d;
-                best = b.toImmutable();
+                best = b.immutable();
             }
         }
         if (best == null) {
@@ -2985,7 +2984,7 @@ public class BrainImpl implements Brain {
     }
 
     /** The next path node or two has a block in it (a hole to dig): fly to the node before it, then mine it. */
-    private void updateMining(Vec3d pos, boolean gliding) {
+    private void updateMining(Vec3 pos, boolean gliding) {
         BlockPos prev = mineTarget;
         mineTarget = null;
         digHold = null;
@@ -2995,13 +2994,13 @@ public class BrainImpl implements Brain {
         }
         int last = path.size() - 1;
         for (int k = Math.max(1, pathIdx); k <= Math.min(last, pathIdx + 2); k++) {
-            BlockPos feet = BlockPos.ofFloored(path.get(k));
-            BlockState st = mc.world.getBlockState(feet);
+            BlockPos feet = BlockPos.containing(path.get(k));
+            BlockState st = mc.level.getBlockState(feet);
             // lava on a route planned under fire resistance is not "a block in the way": it used to trigger a new plan
             // every tick, and the bot wandered back and forth inside the lava sea
-            if (lavaOkNow && st.getFluidState().isIn(FluidTags.LAVA) && st.getCollisionShape(mc.world, feet).isEmpty()) continue;
-            if (!FlightPathfinder.blocks(mc.world, feet, st)) {
-                if (brokeAge.containsKey(feet.asLong()) && mc.player.age - brokeAge.get(feet.asLong()) < Tuning.i("dig.confirm.ticks", 8)) {
+            if (lavaOkNow && st.getFluidState().is(FluidTags.LAVA) && st.getCollisionShape(mc.level, feet).isEmpty()) continue;
+            if (!FlightPathfinder.blocks(mc.level, feet, st)) {
+                if (brokeAge.containsKey(feet.asLong()) && mc.player.tickCount - brokeAge.get(feet.asLong()) < Tuning.i("dig.confirm.ticks", 8)) {
                     digHold = path.get(k - 1);
                     break;
                 }
@@ -3011,19 +3010,19 @@ public class BrainImpl implements Brain {
             if (!tunneling && !plannedMine.contains(feet.asLong()) && Tuning.b("mine.planned.only", true)) {
                 // solid, but the route was planned through here as open air (planned before this chunk had loaded): don't
                 // dig along a route that was never meant to be dug (it goes diagonally, which a 1x1 hole can't) - plan again
-                if (mc.player.age - unplannedLogAge > 40) {
-                    unplannedLogAge = mc.player.age;
+                if (mc.player.tickCount - unplannedLogAge > 40) {
+                    unplannedLogAge = mc.player.tickCount;
                     LOG.info("[VG] {} on the route is solid but was planned as open air - planning again", feet.toShortString());
                 }
                 replanNow = true;
                 return;
             }
-            if (!mineThrough.get() || noMine.contains(feet.asLong()) || !FlightPathfinder.minable(mc.world, feet, st)) {
+            if (!mineThrough.get() || noMine.contains(feet.asLong()) || !FlightPathfinder.minable(mc.level, feet, st)) {
                 replanNow = true; // something's in the way that we won't dig: plan around it
                 tunneling = false;
                 return;
             }
-            mineTarget = feet.toImmutable();
+            mineTarget = feet.immutable();
             mineFrom = path.get(k - 1);
             break;
         }
@@ -3035,14 +3034,14 @@ public class BrainImpl implements Brain {
         // Digging is done on foot: once we're inside the hole (floor right under us, no room to stand), close the elytra
         // and crawl - a crawl breaks rock in one hit and goes at the Speed module's pace; digging while gliding is five
         // times slower per block (a 35-block tunnel took 27 s in the air). So: tunnels are 1x1, crawled.
-        if (Tuning.b("dig.on.foot", true) && !mc.player.isInLava() && mc.player.age - glideCloseAge > 40) {
+        if (Tuning.b("dig.on.foot", true) && !mc.player.isInLava() && mc.player.tickCount - glideCloseAge > 40) {
             double px = mc.player.getX(), py = mc.player.getY(), pz = mc.player.getZ();
-            double drop = -net.minecraft.entity.Entity.adjustMovementForCollisions(mc.player, new Vec3d(0, -0.5, 0), mc.player.getBoundingBox(), mc.world, java.util.List.of()).y;
-            boolean cantStand = !mc.world.isSpaceEmpty(mc.player, new Box(px - 0.3, py, pz - 0.3, px + 0.3, py + 1.8, pz + 0.3));
+            double drop = -net.minecraft.world.entity.Entity.collideBoundingBox(mc.player, new Vec3(0, -0.5, 0), mc.player.getBoundingBox(), mc.level, java.util.List.of()).y;
+            boolean cantStand = !mc.level.noCollision(mc.player, new AABB(px - 0.3, py, pz - 0.3, px + 0.3, py + 1.8, pz + 0.3));
             if (drop < 0.49 && cantStand) {
-                glideCloseAge = mc.player.age;
-                if (srvGlide == 1) mc.getNetworkHandler().sendPacket(new ClientCommandC2SPacket(mc.player, ClientCommandC2SPacket.Mode.START_FALL_FLYING));
-                mc.player.stopGliding();
+                glideCloseAge = mc.player.tickCount;
+                if (srvGlide == 1) mc.getConnection().send(new ServerboundPlayerCommandPacket(mc.player, ServerboundPlayerCommandPacket.Action.START_FALL_FLYING));
+                mc.player.stopFallFlying();
                 pendingStartAge = -1;
                 LOG.info("[VG] in the hole at ({}) - elytra closed, digging on foot from here", v(pos));
                 return;
@@ -3051,7 +3050,7 @@ public class BrainImpl implements Brain {
         if (!mineTarget.equals(prev)) {
             mineTicks = 0;
             lineupTicks = 0;
-            LOG.info("[VG] digging {} ({}) from ({})", mineTarget, mc.world.getBlockState(mineTarget).getBlock(), v(mineFrom));
+            LOG.info("[VG] digging {} ({}) from ({})", mineTarget, mc.level.getBlockState(mineTarget).getBlock(), v(mineFrom));
         }
         if (pos.distanceTo(mineFrom) > 0.3) { // get lined up first (onMove)
             // ...but if we can't get there (a diagonal step between two 1x1 holes, a block the server put back): dig
@@ -3092,21 +3091,21 @@ public class BrainImpl implements Brain {
         mineTick(target);
     }
 
-    private static String v(Vec3d a) {
+    private static String v(Vec3 a) {
         return String.format("%.2f %.2f %.2f", a.x, a.y, a.z);
     }
 
     /** Straight down onto the landing spot, slowing near the ground. */
-    private Vec3d landingMove(Vec3d pos, double sV) {
-        Vec3d spot = goalNode != null ? Vec3d.ofBottomCenter(goalNode) : (path.isEmpty() ? pos : path.getLast());
-        double dx = MathHelper.clamp(spot.x - pos.x, -0.5, 0.5), dz = MathHelper.clamp(spot.z - pos.z, -0.5, 0.5);
+    private Vec3 landingMove(Vec3 pos, double sV) {
+        Vec3 spot = goalNode != null ? Vec3.atBottomCenterOf(goalNode) : (path.isEmpty() ? pos : path.getLast());
+        double dx = Mth.clamp(spot.x - pos.x, -0.5, 0.5), dz = Mth.clamp(spot.z - pos.z, -0.5, 0.5);
         double ground = Math.max(0, pos.y - spot.y);
-        double down = MathHelper.clamp(ground * 0.4, 0.1, sV);
-        return new Vec3d(dx, -Math.min(down, ground + 0.05), dz);
+        double down = Mth.clamp(ground * 0.4, 0.1, sV);
+        return new Vec3(dx, -Math.min(down, ground + 0.05), dz);
     }
 
     /** The furthest point along the path we can fly to in a straight line from here. */
-    private Vec3d pickCarrot(Vec3d pos) {
+    private Vec3 pickCarrot(Vec3 pos) {
         if (path.isEmpty()) return null;
         pathIdx = nearestIndex(pos, Math.max(0, pathIdx - 16), Math.min(path.size(), pathIdx + 96));
 
@@ -3122,7 +3121,7 @@ public class BrainImpl implements Brain {
                 if (j == t) continue;
                 t = j;
                 if (a < 2) break; // right next to us: not worth a wide check, use the normal one below
-                Vec3d p = path.get(j);
+                Vec3 p = path.get(j);
                 if (p.distanceTo(pos) > 96) continue;
                 if (j < last && p.distanceTo(pos) < 0.05) continue; // we're on it: not somewhere to go
                 if (clearLine(pos, p, roomyPad)) {
@@ -3139,7 +3138,7 @@ public class BrainImpl implements Brain {
             int j = Math.min(last, pathIdx + a);
             if (j == tried) continue;
             tried = j;
-            Vec3d p = path.get(j);
+            Vec3 p = path.get(j);
             if (p.distanceTo(pos) > 96) continue;
             if (j < last && p.distanceTo(pos) < 0.05) continue; // we're on it: not somewhere to go
             boolean roomy = clearLine(pos, p, hitboxPadding.get());
@@ -3157,11 +3156,11 @@ public class BrainImpl implements Brain {
         return null;
     }
 
-    private int nearestIndex(Vec3d pos, int from, int to) {
+    private int nearestIndex(Vec3 pos, int from, int to) {
         int best = from;
         double bestD = Double.MAX_VALUE;
         for (int i = from; i < to; i++) {
-            double d = path.get(i).squaredDistanceTo(pos);
+            double d = path.get(i).distanceToSqr(pos);
             if (d < bestD) {
                 bestD = d;
                 best = i;
@@ -3171,9 +3170,9 @@ public class BrainImpl implements Brain {
         // pass, i.e. skip the trip into the dead end - otherwise "nearest" flips between the two and we go back and forth
         double lim = (Math.sqrt(bestD) + 0.3) * (Math.sqrt(bestD) + 0.3);
         for (int i = to - 1; i > best; i--) {
-            if (path.get(i).squaredDistanceTo(pos) <= lim) {
-                if (i - best > 3 && mc.player.age - loopLogAge > 100) {
-                    loopLogAge = mc.player.age;
+            if (path.get(i).distanceToSqr(pos) <= lim) {
+                if (i - best > 3 && mc.player.tickCount - loopLogAge > 100) {
+                    loopLogAge = mc.player.tickCount;
                     LOG.info("[VG] route passes here twice (nodes {} and {}) - skipping the loop", best, i);
                 }
                 return i;
@@ -3183,65 +3182,65 @@ public class BrainImpl implements Brain {
     }
 
     /** Can our gliding hitbox go straight from a to b without touching anything? */
-    private boolean clearLine(Vec3d a, Vec3d b, double pad) {
+    private boolean clearLine(Vec3 a, Vec3 b, double pad) {
         double below = Math.min(pad, Tuning.d("pad.below.max", 0.05));
-        Box box = new Box(a.x - 0.3 - pad, a.y - below, a.z - 0.3 - pad, a.x + 0.3 + pad, a.y + 0.6 + pad, a.z + 0.3 + pad);
-        Vec3d d = b.subtract(a);
-        if (d.lengthSquared() < 1e-8) return true;
+        AABB box = new AABB(a.x - 0.3 - pad, a.y - below, a.z - 0.3 - pad, a.x + 0.3 + pad, a.y + 0.6 + pad, a.z + 0.3 + pad);
+        Vec3 d = b.subtract(a);
+        if (d.lengthSqr() < 1e-8) return true;
         int n = Math.max(1, (int) Math.ceil(d.length() / 0.3));
         // margin from lava for choosing where to fly; creeping / final-move checks (pad < 0) only avoid the lava itself
         double lm = lavaOkNow ? 0 : pad < 0 ? Tuning.d("lava.margin.creep", 0.0) : pad <= 0.051 ? Tuning.d("lava.margin.tight", 0.7) : Tuning.d("lava.margin", 1.2);
-        Box lavaBox = new Box(a.x - 0.3 - lm, a.y - lm, a.z - 0.3 - lm, a.x + 0.3 + lm, a.y + 0.6 + lm, a.z + 0.3 + lm);
+        AABB lavaBox = new AABB(a.x - 0.3 - lm, a.y - lm, a.z - 0.3 - lm, a.x + 0.3 + lm, a.y + 0.6 + lm, a.z + 0.3 + lm);
         for (int i = 1; i <= n; i++) {
-            Vec3d off = d.multiply(i / (double) n);
-            if (!clearBox(box.offset(off))) return false;
-            if (lm > 0 && lavaIn(lavaBox.offset(off))) return false;
+            Vec3 off = d.scale(i / (double) n);
+            if (!clearBox(box.move(off))) return false;
+            if (lm > 0 && lavaIn(lavaBox.move(off))) return false;
         }
         return true;
     }
 
     /** Any lava block the box overlaps (just the lava itself - no margins, no lava falls). */
-    private boolean lavaTouches(Box b) {
-        BlockPos.Mutable q = new BlockPos.Mutable();
-        for (int x = MathHelper.floor(b.minX + 1e-3); x <= MathHelper.floor(b.maxX - 1e-3); x++) {
-            for (int y = MathHelper.floor(b.minY + 1e-3); y <= MathHelper.floor(b.maxY - 1e-3); y++) {
-                for (int z = MathHelper.floor(b.minZ + 1e-3); z <= MathHelper.floor(b.maxZ - 1e-3); z++) {
+    private boolean lavaTouches(AABB b) {
+        BlockPos.MutableBlockPos q = new BlockPos.MutableBlockPos();
+        for (int x = Mth.floor(b.minX + 1e-3); x <= Mth.floor(b.maxX - 1e-3); x++) {
+            for (int y = Mth.floor(b.minY + 1e-3); y <= Mth.floor(b.maxY - 1e-3); y++) {
+                for (int z = Mth.floor(b.minZ + 1e-3); z <= Mth.floor(b.maxZ - 1e-3); z++) {
                     q.set(x, y, z);
-                    if (mc.world.getBlockState(q).getFluidState().isIn(FluidTags.LAVA)) return true;
+                    if (mc.level.getBlockState(q).getFluidState().is(FluidTags.LAVA)) return true;
                 }
             }
         }
         return false;
     }
 
-    private boolean lavaIn(Box b) {
-        BlockPos.Mutable q = new BlockPos.Mutable();
-        for (int x = MathHelper.floor(b.minX); x <= MathHelper.ceil(b.maxX) - 1; x++) {
-            for (int z = MathHelper.floor(b.minZ); z <= MathHelper.ceil(b.maxZ) - 1; z++) {
-                for (int y = MathHelper.floor(b.minY); y <= MathHelper.ceil(b.maxY) - 1; y++) {
+    private boolean lavaIn(AABB b) {
+        BlockPos.MutableBlockPos q = new BlockPos.MutableBlockPos();
+        for (int x = Mth.floor(b.minX); x <= Mth.ceil(b.maxX) - 1; x++) {
+            for (int z = Mth.floor(b.minZ); z <= Mth.ceil(b.maxZ) - 1; z++) {
+                for (int y = Mth.floor(b.minY); y <= Mth.ceil(b.maxY) - 1; y++) {
                     q.set(x, y, z);
-                    if (mc.world.getBlockState(q).getFluidState().isIn(FluidTags.LAVA)) return true;
+                    if (mc.level.getBlockState(q).getFluidState().is(FluidTags.LAVA)) return true;
                 }
                 // a lava fall coming down onto this column?
-                if (FlightPathfinder.lavaAbove(mc.world, x, MathHelper.ceil(b.maxY) - 1, z, Tuning.i("lava.fall.range", 24))) return true;
+                if (FlightPathfinder.lavaAbove(mc.level, x, Mth.ceil(b.maxY) - 1, z, Tuning.i("lava.fall.range", 24))) return true;
             }
         }
         return false;
     }
 
-    private final BlockPos.Mutable cpos = new BlockPos.Mutable();
+    private final BlockPos.MutableBlockPos cpos = new BlockPos.MutableBlockPos();
 
-    private boolean clearBox(Box b) {
-        int x1 = MathHelper.floor(b.minX), y1 = MathHelper.floor(b.minY), z1 = MathHelper.floor(b.minZ);
-        int x2 = MathHelper.ceil(b.maxX) - 1, y2 = MathHelper.ceil(b.maxY) - 1, z2 = MathHelper.ceil(b.maxZ) - 1; // touching isn't overlapping
+    private boolean clearBox(AABB b) {
+        int x1 = Mth.floor(b.minX), y1 = Mth.floor(b.minY), z1 = Mth.floor(b.minZ);
+        int x2 = Mth.ceil(b.maxX) - 1, y2 = Mth.ceil(b.maxY) - 1, z2 = Mth.ceil(b.maxZ) - 1; // touching isn't overlapping
         for (int x = x1; x <= x2; x++) {
             for (int z = z1; z <= z2; z++) {
-                if (waitForChunks.get() && !mc.world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) return false;
+                if (waitForChunks.get() && !mc.level.getChunkSource().hasChunk(x >> 4, z >> 4)) return false;
                 for (int y = y1; y <= y2; y++) {
                     cpos.set(x, y, z);
-                    BlockState cs = mc.world.getBlockState(cpos);
-                    if (lavaOkNow && cs.getFluidState().isIn(FluidTags.LAVA) && cs.getCollisionShape(mc.world, cpos).isEmpty()) continue;
-                    if (FlightPathfinder.blocks(mc.world, cpos, cs)) return false;
+                    BlockState cs = mc.level.getBlockState(cpos);
+                    if (lavaOkNow && cs.getFluidState().is(FluidTags.LAVA) && cs.getCollisionShape(mc.level, cpos).isEmpty()) continue;
+                    if (FlightPathfinder.blocks(mc.level, cpos, cs)) return false;
                 }
             }
         }
@@ -3255,7 +3254,7 @@ public class BrainImpl implements Brain {
         if (!renderPath.get() || path.isEmpty()) return;
         int end = Math.min(path.size() - 1, pathIdx + 600);
         for (int i = Math.max(0, pathIdx); i < end; i++) {
-            Vec3d a = path.get(i), b = path.get(i + 1);
+            Vec3 a = path.get(i), b = path.get(i + 1);
             event.renderer.line(a.x, a.y + 0.2, a.z, b.x, b.y + 0.2, b.z, pathColor.get());
         }
         if (goalNode != null) event.renderer.box(goalNode, goalColor.get(), goalColor.get(), ShapeMode.Lines, 0);
@@ -3265,8 +3264,8 @@ public class BrainImpl implements Brain {
     }
 
     @Override
-    public boolean holdingKey(KeyBinding key) {
-        return holdingForward && key == mc.options.forwardKey;
+    public boolean holdingKey(KeyMapping key) {
+        return holdingForward && key == mc.options.keyUp;
     }
 
 }

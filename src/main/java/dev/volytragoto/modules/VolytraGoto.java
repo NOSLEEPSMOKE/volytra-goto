@@ -12,7 +12,6 @@ import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.mixininterface.IVec3d;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
@@ -27,34 +26,7 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.client.MinecraftClient;
-import net.minecraft.client.option.KeyBinding;
-import net.minecraft.component.EnchantmentEffectComponentTypes;
-import net.minecraft.enchantment.EnchantmentHelper;
-import net.minecraft.entity.EquipmentSlot;
-import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.MovementType;
-import net.minecraft.fluid.FluidState;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.Items;
-import net.minecraft.network.packet.c2s.play.ClientCommandC2SPacket;
-import net.minecraft.network.packet.s2c.common.DisconnectS2CPacket;
-import net.minecraft.network.packet.s2c.play.PlayerPositionLookS2CPacket;
-import net.minecraft.registry.RegistryKey;
-import net.minecraft.registry.tag.FluidTags;
-import net.minecraft.text.Text;
-import net.minecraft.util.Hand;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
-import net.minecraft.util.math.MathHelper;
-import net.minecraft.util.math.Vec3d;
-import net.minecraft.world.Heightmap;
-import net.minecraft.world.World;
-import net.minecraft.world.chunk.ChunkSection;
-import net.minecraft.world.chunk.WorldChunk;
+import net.minecraft.client.KeyMapping;
 
 /**
  * The Volytra Goto module: its settings and the event hooks. All the flying logic is the "brain" ({@link BrainImpl}).
@@ -422,7 +394,7 @@ public class VolytraGoto extends Module {
     }
 
     /** VolytraFlyMixin: should VolytraFly treat this key as held by the player? */
-    public static boolean isHoldingKey(KeyBinding key) {
+    public static boolean isHoldingKey(KeyMapping key) {
         VolytraGoto g = INSTANCE;
         if (g == null || !g.isActive() || g.brain == null) return false;
         try {
@@ -456,8 +428,8 @@ public class VolytraGoto extends Module {
     @Override
     public void onDeactivate() {
         safe("deactivate", () -> brain().deactivate());
-        KeyBinding fwd = mc.options.forwardKey; // never leave forward stuck down
-        fwd.setPressed(Input.isPressed(fwd));
+        KeyMapping fwd = mc.options.keyUp; // never leave forward stuck down
+        fwd.setDown(Input.isPressed(fwd));
     }
 
     @Override
@@ -472,7 +444,7 @@ public class VolytraGoto extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (safe("tick", () -> brain().tick(event)) && brainErrors > 0 && mc.player != null && mc.player.age % 20 == 0) brainErrors--;
+        if (safe("tick", () -> brain().tick(event)) && brainErrors > 0 && mc.player != null && mc.player.tickCount % 20 == 0) brainErrors--;
     }
 
     @EventHandler(priority = EventPriority.LOWEST)

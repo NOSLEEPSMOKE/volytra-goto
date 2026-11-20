@@ -4,7 +4,7 @@ import meteordevelopment.meteorclient.events.entity.player.PlayerMoveEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
-import net.minecraft.client.option.KeyBinding;
+import net.minecraft.client.KeyMapping;
 
 /** What the Volytra Goto module asks of its flight logic ({@code dev.volytragoto.brain.BrainImpl}). */
 public interface Brain {
@@ -22,7 +22,7 @@ public interface Brain {
     void render(Render3DEvent event);
 
     /** Should VolytraFly treat this key as physically held? */
-    boolean holdingKey(KeyBinding key);
+    boolean holdingKey(KeyMapping key);
 
     String infoString();
 

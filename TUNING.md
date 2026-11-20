@@ -1,7 +1,7 @@
 # Tuning values
 
 Numbers used by the flight logic that have no setting in the Meteor menu, with their defaults. The defaults
-are what worked in testing on 6b6t (Minecraft 1.21.11); other servers may want other values.
+are what worked in testing on 6b6t (on Minecraft 1.21.11); other servers may want other values.
 
 To change one without rebuilding, create `.minecraft/config/volytragoto.properties` with lines like
 `lava.margin = 1.5`. The file is read again whenever it changes, also in the middle of a flight.

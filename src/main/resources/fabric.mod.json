@@ -24,8 +24,8 @@
   },
   "depends": {
     "fabricloader": ">=0.15.0",
-    "minecraft": "1.21.11",
-    "java": ">=21",
+    "minecraft": "${mc_version}",
+    "java": ">=25",
     "meteor-client": "*",
     "volytrafly": "*"
   }

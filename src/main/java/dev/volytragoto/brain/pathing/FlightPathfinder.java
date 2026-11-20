@@ -2,18 +2,17 @@ package dev.volytragoto.brain.pathing;
 
 import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongSet;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.FallingBlock;
-import net.minecraft.util.math.Direction;
-import net.minecraft.util.math.BlockPos;
-import net.minecraft.world.World;
-
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
+import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.FallingBlock;
+import net.minecraft.world.level.block.state.BlockState;
 
 /**
  * Weighted A* over block cells for a flying player (elytra control flight can move in any direction, so every one of
@@ -42,7 +41,7 @@ public class FlightPathfinder {
         Blocks.NETHER_PORTAL, Blocks.END_PORTAL, Blocks.END_GATEWAY, Blocks.BUBBLE_COLUMN, Blocks.SCAFFOLDING
     );
 
-    private final World world;
+    private final Level world;
     private final BlockPos start;
     private final BlockPos goal;      // exact node to reach, or null while it's unknown (not loaded yet)
     private final double tx, tz;      // where we're ultimately going
@@ -99,8 +98,8 @@ public class FlightPathfinder {
     private double[] openF = new double[1024];
     private Node[] openNode = new Node[1024];
     private int openSize;
-    private final BlockPos.Mutable mpos = new BlockPos.Mutable();
-    private final BlockPos.Mutable qpos = new BlockPos.Mutable(); // lava lookups (mpos may be in use by cell())
+    private final BlockPos.MutableBlockPos mpos = new BlockPos.MutableBlockPos();
+    private final BlockPos.MutableBlockPos qpos = new BlockPos.MutableBlockPos(); // lava lookups (mpos may be in use by cell())
     private final byte[] cube = new byte[27];                     // expand(): states of the 3x3x3 around the node
 
     private Node startNode, best;
@@ -166,12 +165,12 @@ public class FlightPathfinder {
      * @param horizon            while {@code goal} is null: stop at a node this many blocks (horizontally) from the start
      * @param unloadedIsFrontier true: unloaded chunks end the path (wait for them); false: treat them as open air
      */
-    public FlightPathfinder(World world, BlockPos start, BlockPos goal, double tx, double tz, double desiredY, double yWeight,
+    public FlightPathfinder(Level world, BlockPos start, BlockPos goal, double tx, double tz, double desiredY, double yWeight,
                             int horizon, boolean unloadedIsFrontier, int minY, int maxY, int maxNodes, double wallCost,
                             boolean allowLowGaps, double mineCost, LongSet noMine) {
         this.world = world;
-        this.start = start.toImmutable();
-        this.goal = goal == null ? null : goal.toImmutable();
+        this.start = start.immutable();
+        this.goal = goal == null ? null : goal.immutable();
         this.tx = tx;
         this.tz = tz;
         this.desiredY = desiredY;
@@ -547,8 +546,8 @@ public class FlightPathfinder {
         if (st.isAir()) return CL_PASS; // no fluid, no collision box
         // fire burns like lava when we brush past it: give the cells next to it the same extra cost (it always sits on a
         // solid block, so it never counts as a "lava fall" for anything below)
-        if (st.isOf(Blocks.FIRE) || st.isOf(Blocks.SOUL_FIRE)) return CL_LAVA;
-        if (st.getFluidState().isIn(net.minecraft.registry.tag.FluidTags.LAVA)) return CL_LAVA;
+        if (st.is(Blocks.FIRE) || st.is(Blocks.SOUL_FIRE)) return CL_LAVA;
+        if (st.getFluidState().is(net.minecraft.tags.FluidTags.LAVA)) return CL_LAVA;
         if (!st.getCollisionShape(world, pos).isEmpty() || !st.getFluidState().isEmpty()) return CL_STOP;
         return CL_PASS;
     }
@@ -559,7 +558,7 @@ public class FlightPathfinder {
         int i = idx(x, y, z);
         int b = a[i], cls = (b & I_CLASS) >> I_CLASS_SHIFT;
         if (cls == 0) {
-            if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) return false;
+            if (!world.getChunkSource().hasChunk(x >> 4, z >> 4)) return false;
             qpos.set(x, y, z);
             cls = lavaClass(world.getBlockState(qpos), qpos);
             a[i] = (short) (b | cls << I_CLASS_SHIFT);
@@ -574,7 +573,7 @@ public class FlightPathfinder {
      * meets one of those. Only for cells in a loaded chunk.
      */
     private boolean lavaFall(int x, int y, int z) {
-        final int top = world.getTopYInclusive(), sx = x >> 4, sz = z >> 4, col = idx(x, 0, z);
+        final int top = world.getMaxY(), sx = x >> 4, sz = z >> 4, col = idx(x, 0, z);
         Sec sec = null;
         short[] a = null;
 
@@ -692,8 +691,8 @@ public class FlightPathfinder {
     /** A cell that hasn't been looked at yet: work out its state from the world and remember it. */
     private byte readCell(short[] a, int i, int x, int y, int z) {
         byte s;
-        if (!world.getWorldBorder().contains(x + 0.5, z + 0.5)) s = BLOCKED;
-        else if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4)) s = UNLOADED;
+        if (!world.getWorldBorder().isWithinBounds(x + 0.5, z + 0.5)) s = BLOCKED;
+        else if (!world.getChunkSource().hasChunk(x >> 4, z >> 4)) s = UNLOADED;
         else {
             mpos.set(x, y, z);
             BlockState st = world.getBlockState(mpos);
@@ -702,16 +701,16 @@ public class FlightPathfinder {
                 int b = a[i];
                 if ((b & I_CLASS) == 0) a[i] = (short) (b | lavaClass(st, mpos) << I_CLASS_SHIFT);
             }
-            if (lavaOk && st.getFluidState().isIn(net.minecraft.registry.tag.FluidTags.LAVA) && st.getCollisionShape(world, mpos).isEmpty()) s = FREE;
+            if (lavaOk && st.getFluidState().is(net.minecraft.tags.FluidTags.LAVA) && st.getCollisionShape(world, mpos).isEmpty()) s = FREE;
             else if (!blocks(world, mpos, st)) s = !lavaOk && lavaFall(x, y, z) ? BLOCKED : FREE; // lava falls come down here
-            else s = mineCost > 0 && !noMine.contains(BlockPos.asLong(x, y, z)) && minable(world, mpos.toImmutable(), st) ? MINE : BLOCKED;
+            else s = mineCost > 0 && !noMine.contains(BlockPos.asLong(x, y, z)) && minable(world, mpos.immutable(), st) ? MINE : BLOCKED;
         }
         a[i] |= s; // (lavaFall() may have written to the same short)
         return s;
     }
 
     /** Can't (or shouldn't) fly through this block: anything solid, any liquid, cobwebs, fire, portals... */
-    public static boolean blocks(World world, BlockPos pos, BlockState state) {
+    public static boolean blocks(Level world, BlockPos pos, BlockState state) {
         if (state.isAir()) return false;
         if (!state.getFluidState().isEmpty()) return true;
         if (AVOID.contains(state.getBlock())) return true;
@@ -722,13 +721,13 @@ public class FlightPathfinder {
      * Lava somewhere above (within range) with nothing but air/non-solid in between: a lava fall comes (or will come)
      * down through this cell. Lava resting on a solid block doesn't count.
      */
-    public static boolean lavaAbove(World world, int x, int y, int z, int range) {
-        BlockPos.Mutable q = new BlockPos.Mutable();
-        int top = Math.min(world.getTopYInclusive(), y + range);
+    public static boolean lavaAbove(Level world, int x, int y, int z, int range) {
+        BlockPos.MutableBlockPos q = new BlockPos.MutableBlockPos();
+        int top = Math.min(world.getMaxY(), y + range);
         for (int yy = y + 1; yy <= top; yy++) {
             q.set(x, yy, z);
             BlockState st = world.getBlockState(q);
-            if (st.getFluidState().isIn(net.minecraft.registry.tag.FluidTags.LAVA)) return true;
+            if (st.getFluidState().is(net.minecraft.tags.FluidTags.LAVA)) return true;
             if (!st.getCollisionShape(world, q).isEmpty() || !st.getFluidState().isEmpty()) return false;
         }
         return false;
@@ -742,21 +741,21 @@ public class FlightPathfinder {
      * Safe to dig out for a 1x1 hole: breakable and not obsidian-hard (hardness under 20), no water/lava touching it
      * (would flood in), nothing that falls (sand, gravel) on top.
      */
-    public static boolean minable(World world, BlockPos pos, BlockState state) {
+    public static boolean minable(Level world, BlockPos pos, BlockState state) {
         if (!state.getFluidState().isEmpty() || AVOID.contains(state.getBlock()) || state.hasBlockEntity()) return false;
-        float h = state.getHardness(world, pos);
+        float h = state.getDestroySpeed(world, pos);
         if (h < 0 || h >= 20) return false;
         for (Direction d : Direction.values()) {
-            if (!world.getBlockState(pos.offset(d)).getFluidState().isEmpty()) return false;
+            if (!world.getBlockState(pos.relative(d)).getFluidState().isEmpty()) return false;
         }
-        return !(world.getBlockState(pos.up()).getBlock() instanceof FallingBlock);
+        return !(world.getBlockState(pos.above()).getBlock() instanceof FallingBlock);
     }
 
     /** A player could be here: this block and the one above are open (and loaded). */
-    public static boolean open(World world, int x, int y, int z) {
-        if (y < world.getBottomY() || y + 1 > world.getTopYInclusive()) return false;
-        if (!world.getChunkManager().isChunkLoaded(x >> 4, z >> 4) || !world.getWorldBorder().contains(x + 0.5, z + 0.5)) return false;
-        BlockPos.Mutable p = new BlockPos.Mutable(x, y, z);
+    public static boolean open(Level world, int x, int y, int z) {
+        if (y < world.getMinY() || y + 1 > world.getMaxY()) return false;
+        if (!world.getChunkSource().hasChunk(x >> 4, z >> 4) || !world.getWorldBorder().isWithinBounds(x + 0.5, z + 0.5)) return false;
+        BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos(x, y, z);
         if (blocks(world, p, world.getBlockState(p))) return false;
         p.setY(y + 1);
         return !blocks(world, p, world.getBlockState(p));

@@ -5,8 +5,8 @@ import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import dev.volytragoto.modules.VolytraGoto;
 import meteordevelopment.meteorclient.commands.Command;
 import meteordevelopment.meteorclient.systems.modules.Modules;
-import net.minecraft.command.CommandSource;
-import net.minecraft.world.World;
+import net.minecraft.client.multiplayer.ClientSuggestionProvider;
+import net.minecraft.world.level.Level;
 
 /** .vgoto x z | .vgoto x y z | .vgoto stop | .vgoto (status) */
 public class VGotoCommand extends Command {
@@ -15,7 +15,7 @@ public class VGotoCommand extends Command {
     }
 
     @Override
-    public void build(LiteralArgumentBuilder<CommandSource> builder) {
+    public void build(LiteralArgumentBuilder<ClientSuggestionProvider> builder) {
         builder.executes(ctx -> {
             VolytraGoto g = Modules.get().get(VolytraGoto.class);
             if (g.isActive()) info("Flying to %d %d: %s.", g.targetX.get(), g.targetZ.get(), g.statusLine());
@@ -37,7 +37,7 @@ public class VGotoCommand extends Command {
         builder.then(literal("ow").then(argument("x", IntegerArgumentType.integer()).then(argument("z", IntegerArgumentType.integer())
             .executes(ctx -> {
                 int x = IntegerArgumentType.getInteger(ctx, "x"), z = IntegerArgumentType.getInteger(ctx, "z");
-                if (mc.world != null && mc.world.getRegistryKey() == World.NETHER) {
+                if (mc.level != null && mc.level.dimension() == Level.NETHER) {
                     info("Overworld %d %d = Nether %d %d.", x, z, Math.floorDiv(x, 8), Math.floorDiv(z, 8));
                     x = Math.floorDiv(x, 8);
                     z = Math.floorDiv(z, 8);

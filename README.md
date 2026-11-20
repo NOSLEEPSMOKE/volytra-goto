@@ -4,8 +4,12 @@ A [Meteor Client](https://meteorclient.com) addon that flies you somewhere with 
 walks you somewhere: give it coordinates, it plans a 3D route through the chunks it can see and steers
 [VolytraFly](https://github.com/Volizray/VolytraFly-Addon) along it, through Nether caves as well as open sky.
 
-It was built and tested on 6b6t (Minecraft 1.21.11), and its timing is tuned to what that server accepts. It is a
-hacked-client module: only use it on servers whose rules allow that.
+**This is the Minecraft 26.2 branch.** The flight logic is the same code as the 1.21.11 version on the
+[main branch](https://github.com/NoSleepSmoke/volytra-goto), carried over to Minecraft 26.2, Meteor Client for 26.2 and
+VolytraFly 0.1.2. All of the testing so far was done on 1.21.11.
+
+It was built and tested on 6b6t, and its timing is tuned to what that server accepts. It is a hacked-client module:
+only use it on servers whose rules allow that.
 
 ## What it does
 
@@ -19,9 +23,9 @@ hacked-client module: only use it on servers whose rules allow that.
 
 ## Requirements
 
-- Minecraft 1.21.11 with Fabric Loader
-- Meteor Client (for 1.21.11)
-- VolytraFly 0.1.1
+- Minecraft 26.2 with Fabric Loader (Java 25)
+- Meteor Client (for 26.2)
+- VolytraFly 0.1.2 (the 26.2 jar)
 
 ## Install
 
@@ -72,8 +76,9 @@ The many smaller numbers (lava margins, take-off timing, how hard it may acceler
 
 ## Building
 
-1. Put the three jars named in [libs/README.md](libs/README.md) into `libs/`.
-2. Run `./gradlew build` with a JDK 21 or newer.
+1. Put the VolytraFly jar named in [libs/README.md](libs/README.md) into `libs/`. Meteor Client is fetched from its
+   maven by the build.
+2. Run `./gradlew build` with a JDK 25 or newer.
 3. The jar is in `build/libs/`.
 
 ## Credits

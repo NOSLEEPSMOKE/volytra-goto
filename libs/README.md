@@ -1,12 +1,11 @@
 # libs
 
-The build compiles against three jars that are not in this repository. Put them here under exactly these names
-(or change the names in `build.gradle`):
+The build compiles against VolytraFly, which is not in this repository and has no maven. Put its jar here under
+exactly this name (or change the name in `build.gradle`):
 
 | file | where it comes from |
 | --- | --- |
-| `meteor-client-1.21.11-86.jar` | Meteor Client for Minecraft 1.21.11, from https://meteorclient.com |
-| `VolytraFly-0.1.1-1.21.11.jar` | VolytraFly, from https://github.com/Volizray/VolytraFly-Addon |
-| `orbit-0.2.4.jar` | Meteor's event bus. It is inside the Meteor jar: `META-INF/jars/orbit-0.2.4.jar` |
+| `VolytraFly-0.1.2-26.2.jar` | VolytraFly releases, https://github.com/Volizray/VolytraFly-Addon/releases |
 
-They are only needed to compile; none of them ends up inside the Volytra Goto jar.
+It is only needed to compile; it does not end up inside the Volytra Goto jar. Meteor Client is downloaded from
+`maven.meteordev.org` by the build.
