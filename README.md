@@ -72,9 +72,11 @@ The many smaller numbers (lava margins, take-off timing, how hard it may acceler
 
 ## Building
 
-1. Put the three jars named in [libs/README.md](libs/README.md) into `libs/`.
-2. Run `./gradlew build` with a JDK 21 or newer.
-3. The jar is in `build/libs/`.
+Clone the repository and run `./gradlew build` (`gradlew.bat build` on Windows) with JDK 25 or newer. The jar ends
+up in `build/libs/`. (JDK 25 is what the Fabric build plugin needs; the mod itself runs on Java 21.)
+
+Nothing has to be added by hand: the build downloads Minecraft, Meteor Client (from Meteor's maven) and VolytraFly
+(from its GitHub release) to compile against. None of them ends up inside the Volytra Goto jar.
 
 ## Credits
 
